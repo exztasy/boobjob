@@ -55,29 +55,37 @@ export interface World {
   hub: string;
   /** An ordinary voice channel that is not managed by the bot. */
   lounge: string;
+  /** An ordinary text channel. */
+  general: string;
   alice: string;
   bob: string;
   carol: string;
 }
 
+export type StandardIds = Pick<World, 'category' | 'hub' | 'lounge' | 'general' | 'alice' | 'bob' | 'carol'>;
+
 export interface WorldOptions extends Partial<FakeDiscordOptions> {
   tuning?: Partial<Tuning>;
   databasePath?: string;
+  /** Set to `false` to start without the standard hub being registered. */
+  registerHub?: boolean;
   /** Runs after the standard server is built and before the bot connects. */
-  prepare?: (fake: FakeDiscord, ids: Pick<World, 'category' | 'hub' | 'lounge' | 'alice' | 'bob' | 'carol'>) => void;
+  prepare?: (fake: FakeDiscord, ids: StandardIds) => void;
 }
 
 export async function createWorld(options: WorldOptions = {}): Promise<World> {
-  const { tuning, databasePath, prepare, ...fakeOptions } = options;
+  const { tuning, databasePath, prepare, registerHub = true, ...fakeOptions } = options;
   const fake = new FakeDiscord({ botPermissions: PermissionFlagsBits.Administrator, ...fakeOptions });
 
   const category = fake.addCategory('Voice channels');
   const hub = fake.addVoiceChannel('➕ Create a channel', { parent: category });
   const lounge = fake.addVoiceChannel('Lounge', { parent: category });
-  const ids = {
+  const general = fake.addTextChannel('general');
+  const ids: StandardIds = {
     category,
     hub,
     lounge,
+    general,
     alice: fake.addUser('alice'),
     bob: fake.addUser('bob'),
     carol: fake.addUser('carol'),
@@ -86,7 +94,7 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
 
   await fake.start();
   const { bot, log } = await startBot(fake, { tuning, databasePath });
-  bot.store.addHub(fake.guildId, hub);
+  if (registerHub) bot.store.addHub(fake.guildId, hub);
   return { fake, bot, log, ...ids };
 }
 

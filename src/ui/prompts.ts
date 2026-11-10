@@ -226,7 +226,7 @@ export function sanctionPrompt(
     content: compose(
       notice,
       mute ? '**🔇 Muted members**' : '**🙉 Deafened members**',
-      `Tick someone to ${kind} them, untick them to undo it. It only applies while they are in ${channelMention(channelId)} and is lifted as soon as they leave.`,
+      `Tick someone to ${kind} them, untick them to undo it. It only applies inside ${channelMention(channelId)}: it is lifted when they leave and applies again if they come back.`,
       overflow,
     ),
     components: [menuRow(menu)],
