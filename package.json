@@ -1,0 +1,28 @@
+{
+  "name": "boobjob",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discord bot for dynamic, private, owner-managed voice channels",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node --disable-warning=ExperimentalWarning dist/index.js",
+    "dev": "tsx watch --disable-warning=ExperimentalWarning src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --disable-warning=ExperimentalWarning --import tsx --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "discord.js": "^14.28.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "ws": "^8.22.2"
+  }
+}
