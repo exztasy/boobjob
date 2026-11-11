@@ -8,8 +8,35 @@ export const REQUIRED_PERMISSIONS = P.ViewChannel | P.Connect | P.ManageChannels
 /** Needed for mute, deafen and the control panel message. */
 export const FEATURE_PERMISSIONS = P.MuteMembers | P.DeafenMembers | P.SendMessages | P.ReadMessageHistory;
 
+/**
+ * Everyday permissions that servers commonly allow or deny per role in a voice
+ * category: mute roles, "no streaming", "no soundboard" and the like. The bot
+ * never uses them. It holds them because Discord only lets a bot put a
+ * permission into a channel's overwrites if it has that permission itself, and
+ * a personal channel has to carry over the restrictions of its category.
+ */
+export const INHERITABLE_PERMISSIONS =
+  P.Speak |
+  P.Stream |
+  P.UseVAD |
+  P.AddReactions |
+  P.EmbedLinks |
+  P.AttachFiles |
+  P.UseExternalEmojis |
+  P.UseExternalStickers |
+  P.UseSoundboard |
+  P.UseExternalSounds |
+  P.UseEmbeddedActivities |
+  P.UseApplicationCommands |
+  P.UseExternalApps |
+  P.SendTTSMessages |
+  P.SendVoiceMessages |
+  P.SendPolls |
+  P.SetVoiceChannelStatus |
+  P.CreateInstantInvite;
+
 /** What the invite link asks for. */
-export const INVITE_PERMISSIONS = REQUIRED_PERMISSIONS | FEATURE_PERMISSIONS;
+export const INVITE_PERMISSIONS = REQUIRED_PERMISSIONS | FEATURE_PERMISSIONS | INHERITABLE_PERMISSIONS;
 
 /** Names, as shown in Discord's role settings, of the wanted permissions the member lacks server-wide. */
 export function missingPermissions(member: GuildMember, wanted: bigint): string[] {

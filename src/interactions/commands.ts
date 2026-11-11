@@ -8,7 +8,9 @@ import {
   channelMention,
   escapeMarkdown,
   type AutocompleteInteraction,
+  type CategoryChannel,
   type ChatInputCommandInteraction,
+  type Guild,
   type GuildMember,
   type RESTPostAPIChatInputApplicationCommandsJSONBody,
   type VoiceChannel,
@@ -326,7 +328,7 @@ async function runHubCommand(context: BotContext, interaction: ChatInputCommandI
       store.addHub(guild.id, hub.id);
       return [
         `✅ Created ${channelMention(hub.id)}. Everyone who joins it gets a private voice channel of their own${category ? ` in **${escapeMarkdown(category.name)}**` : ''}.`,
-        permissionReport(me),
+        permissionReport(context, guild, me),
       ].join('\n\n');
     }
 
@@ -343,7 +345,7 @@ async function runHubCommand(context: BotContext, interaction: ChatInputCommandI
         .catch((error: unknown) => log.error(`Could not reconcile guild ${guild.id} after adding a hub`, error));
       return [
         `✅ ${channelMention(channel.id)} is now a hub. Everyone who joins it gets a private voice channel of their own.`,
-        permissionReport(me),
+        permissionReport(context, guild, me),
       ].join('\n\n');
     }
 
@@ -362,7 +364,7 @@ async function runHubCommand(context: BotContext, interaction: ChatInputCommandI
       });
       return [
         lines.length > 0 ? ['**Voice hubs**', ...lines].join('\n') : 'There are no hubs yet. Create one with `/voicehub setup`.',
-        permissionReport(me),
+        permissionReport(context, guild, me),
       ].join('\n\n');
     }
 
@@ -372,10 +374,9 @@ async function runHubCommand(context: BotContext, interaction: ChatInputCommandI
 }
 
 /** Tells an admin whether the bot's role is set up correctly, and what to fix if not. */
-function permissionReport(me: GuildMember): string {
+function permissionReport(context: BotContext, guild: Guild, me: GuildMember): string {
   const required = missingPermissions(me, REQUIRED_PERMISSIONS);
   const optional = missingPermissions(me, FEATURE_PERMISSIONS);
-  if (required.length === 0 && optional.length === 0) return '✅ My role has every permission I need.';
 
   const lines: string[] = [];
   if (required.length > 0) {
@@ -384,6 +385,27 @@ function permissionReport(me: GuildMember): string {
   if (optional.length > 0) {
     lines.push(`⚠️ Mute, deafen or the control panel won't work until my role has: **${optional.join('**, **')}**.`);
   }
-  lines.push('Grant them in Server Settings → Roles. They need to be on the role itself, not on a single channel.');
-  return lines.join('\n');
+  if (lines.length > 0) {
+    lines.push('Grant them in Server Settings → Roles. They need to be on the role itself, not on a single channel.');
+  }
+
+  // A personal channel starts as a copy of its category's permission overrides, but Discord
+  // only lets a bot copy the permissions it holds. Say so, rather than dropping them quietly.
+  const categories = new Map<string, CategoryChannel>();
+  for (const hub of context.store.listHubs(guild.id)) {
+    const category = guild.channels.cache.get(hub.channelId)?.parent;
+    if (category?.type === ChannelType.GuildCategory) categories.set(category.id, category);
+  }
+  for (const category of categories.values()) {
+    const gap = context.channels.inheritanceGap(category, me);
+    if (gap.length === 0) continue;
+    const them = gap.length === 1 ? 'it' : 'them';
+    lines.push(
+      `⚠️ **${escapeMarkdown(category.name)}** has role or member overrides for **${gap.join('**, **')}**. ` +
+        `I can only copy permissions my own role has, so personal channels there won't inherit ${them}. ` +
+        `Add ${them} to my role if you rely on ${them}.`,
+    );
+  }
+
+  return lines.length > 0 ? lines.join('\n') : '✅ My role has every permission I need.';
 }

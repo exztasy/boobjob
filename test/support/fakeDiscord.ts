@@ -136,6 +136,7 @@ export class FakeDiscord {
 
   private readonly options: Required<Omit<FakeDiscordOptions, 'renameLimit'>> & Pick<FakeDiscordOptions, 'renameLimit'>;
   private readonly failures: { method: string; path: RegExp; status: number; body: Json }[] = [];
+  private readonly delays: { method: string; path: RegExp; ms: number }[] = [];
   private readonly interactions = new Map<string, PendingInteraction>();
   private readonly renames = new Map<string, number[]>();
   private server: WebSocketServer | null = null;
@@ -360,6 +361,11 @@ export class FakeDiscord {
     this.failures.push({ method, path, status, body });
   }
 
+  /** Makes the next matching request take this long to answer, as a slow Discord would. */
+  delayNext(method: string, path: RegExp, ms: number): void {
+    this.delays.push({ method, path, ms });
+  }
+
   requestsTo(method: string, path: RegExp): RecordedRequest[] {
     return this.requests.filter((request) => request.method === method && path.test(request.path));
   }
@@ -574,6 +580,12 @@ export class FakeDiscord {
     const method = (init.method ?? 'GET').toUpperCase();
     const body = typeof init.body === 'string' ? (JSON.parse(init.body) as Json) : undefined;
     const reason = readHeader(init.headers, 'x-audit-log-reason');
+
+    const slow = this.delays.findIndex((delay) => delay.method === method && delay.path.test(path));
+    if (slow >= 0) {
+      const [delay] = this.delays.splice(slow, 1);
+      await new Promise((resolve) => setTimeout(resolve, delay!.ms));
+    }
 
     const forced = this.failures.findIndex((failure) => failure.method === method && failure.path.test(path));
     let response: Reply;

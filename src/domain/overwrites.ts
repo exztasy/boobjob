@@ -119,6 +119,19 @@ export function buildOverwrites(input: OverwriteInput): Overwrite[] {
     .slice(0, MAX_OVERWRITES);
 }
 
+/**
+ * Permissions that the category sets per role or member but that the bot
+ * cannot carry over to a personal channel, because it does not hold them.
+ * `0n` means the channel inherits its category faithfully.
+ */
+export function uninheritablePermissions(base: readonly Overwrite[], botPermissions: bigint): bigint {
+  if ((botPermissions & Administrator) !== 0n) return 0n;
+  const settable = botPermissions & ~ManageRoles;
+  let lost = 0n;
+  for (const overwrite of base) lost |= (overwrite.allow | overwrite.deny) & ~settable;
+  return lost;
+}
+
 function unique(ids: readonly string[]): string[] {
   return [...new Set(ids)];
 }

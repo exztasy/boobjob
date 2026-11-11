@@ -6,6 +6,7 @@ import {
   BOT_CHANNEL_PERMISSIONS,
   MAX_OVERWRITES,
   buildOverwrites,
+  uninheritablePermissions,
   type Overwrite,
   type OverwriteInput,
 } from '../src/domain/overwrites.js';
@@ -246,6 +247,42 @@ describe('a bot without the Administrator permission', () => {
       overwrites.filter((overwrite) => overwrite.id === MODERATOR_ROLE || overwrite.id === MUTED_ROLE),
       base,
     );
+  });
+});
+
+describe('permissions the bot cannot carry over', () => {
+  const base = [
+    role(MODERATOR_ROLE, P.ManageMessages | P.MoveMembers),
+    role(MUTED_ROLE, 0n, P.Speak | P.SendMessages),
+  ];
+
+  test('are the ones the category uses and the bot lacks', () => {
+    const botPermissions = BOT_CHANNEL_PERMISSIONS | P.ManageRoles;
+
+    assert.equal(uninheritablePermissions(base, botPermissions), P.ManageMessages | P.Speak);
+  });
+
+  test('always include Manage Roles, which only administrators may put into an overwrite', () => {
+    const withManageRoles = [role(MODERATOR_ROLE, P.ManageRoles)];
+
+    assert.equal(uninheritablePermissions(withManageRoles, P.ManageRoles | P.ViewChannel), P.ManageRoles);
+  });
+
+  test('are none for an administrator, or when the bot holds everything the category uses', () => {
+    assert.equal(uninheritablePermissions(base, P.Administrator), 0n);
+    assert.equal(uninheritablePermissions(base, P.ManageMessages | P.MoveMembers | P.Speak | P.SendMessages), 0n);
+    assert.equal(uninheritablePermissions([], 0n), 0n);
+  });
+
+  test('are exactly what the built overwrites leave out', () => {
+    const botPermissions = BOT_CHANNEL_PERMISSIONS | P.ManageRoles;
+    const overwrites = buildOverwrites(input({ botPermissions, privacy: 'public', base }));
+    const kept = overwrites
+      .filter((overwrite) => overwrite.id === MODERATOR_ROLE || overwrite.id === MUTED_ROLE)
+      .reduce((bits, overwrite) => bits | overwrite.allow | overwrite.deny, 0n);
+    const wanted = base.reduce((bits, overwrite) => bits | overwrite.allow | overwrite.deny, 0n);
+
+    assert.equal(wanted & ~kept, uninheritablePermissions(base, botPermissions));
   });
 });
 

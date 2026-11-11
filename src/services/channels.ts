@@ -10,11 +10,11 @@ import {
   type GuildMember,
   type VoiceChannel,
 } from 'discord.js';
-import { buildOverwrites, type Overwrite } from '../domain/overwrites.js';
+import { buildOverwrites, uninheritablePermissions, type Overwrite } from '../domain/overwrites.js';
 import { FALLBACK_CHANNEL_NAME, MAX_LIST_SIZE, defaultChannelName, resolveSettings } from '../domain/settings.js';
 import { UserError } from '../errors.js';
 import type { Logger } from '../logger.js';
-import { REQUIRED_PERMISSIONS, missingPermissions } from '../permissions.js';
+import { REQUIRED_PERMISSIONS, missingPermissions, permissionNames } from '../permissions.js';
 import type { AccessLists, Privacy, Store } from '../storage/store.js';
 import type { Tuning } from '../tuning.js';
 import { describeError, hasApiCode, humanCount, isVoiceChannel, sleep, voiceStatesIn } from '../util/discord.js';
@@ -46,6 +46,8 @@ export class ChannelService {
   /** Channels whose deletion is under way; they must not be handed back to their owner. */
   private readonly deleting = new Set<string>();
   private readonly lastFailureNotice = new Map<string, number>();
+  /** What was last logged as impossible to inherit, per category, so the log says it once. */
+  private readonly reportedGaps = new Map<string, bigint>();
 
   constructor(private readonly deps: ChannelDeps) {}
 
@@ -113,6 +115,7 @@ export class ChannelService {
       maxBitrate: guild.maximumBitrate,
     });
 
+    this.logInheritanceGap(hub.parent, me);
     const reason = `Temporary voice channel for ${member.user.tag}`;
     const fixed = {
       type: ChannelType.GuildVoice as const,
@@ -124,9 +127,10 @@ export class ChannelService {
       }),
       reason,
     };
-    // Something a member saved earlier can stop being acceptable: a name the server now
-    // filters, a region Discord retired, a bitrate above the current boost level. Getting
-    // a channel matters more than any one setting, so fall back to plainer ones.
+    // Something a member saved earlier can stop being acceptable: a region Discord retired,
+    // a bitrate above the current boost level, a name the server now filters. Getting a
+    // channel matters more than any one setting, so give up on them step by step: first
+    // the ones that depend on the server, then the custom name, then the member's own name.
     const attempts = [
       {
         name: settings.name,
@@ -135,7 +139,8 @@ export class ChannelService {
         videoQualityMode: settings.videoQuality,
         ...(settings.rtcRegion ? { rtcRegion: settings.rtcRegion } : {}),
       },
-      { name: defaultChannelName(member.displayName) },
+      { name: settings.name, userLimit: settings.userLimit },
+      { name: defaultChannelName(member.displayName), userLimit: settings.userLimit },
       { name: FALLBACK_CHANNEL_NAME },
     ];
 
@@ -241,21 +246,34 @@ export class ChannelService {
     category: CategoryChannel | null,
     subject: OverwriteSubject,
   ): Overwrite[] {
-    const base =
-      category?.permissionOverwrites.cache.map((overwrite) => ({
-        id: overwrite.id,
-        type: overwrite.type,
-        allow: overwrite.allow.bitfield,
-        deny: overwrite.deny.bitfield,
-      })) ?? [];
-
     return buildOverwrites({
       everyoneId: guild.id,
       botId: me.id,
       botPermissions: me.permissions.bitfield,
-      base,
+      base: inheritedOverwrites(category),
       ...subject,
     });
+  }
+
+  /**
+   * The permissions a category sets per role or member that personal channels
+   * in it cannot inherit, because the bot's role does not hold them. Empty
+   * when the bot is an administrator or the category asks for nothing special.
+   */
+  inheritanceGap(category: CategoryChannel | null, me: GuildMember): string[] {
+    return permissionNames(uninheritablePermissions(inheritedOverwrites(category), me.permissions.bitfield));
+  }
+
+  private logInheritanceGap(category: CategoryChannel | null, me: GuildMember): void {
+    if (!category) return;
+    const gap = uninheritablePermissions(inheritedOverwrites(category), me.permissions.bitfield);
+    if (gap === (this.reportedGaps.get(category.id) ?? 0n)) return;
+    this.reportedGaps.set(category.id, gap);
+    if (gap === 0n) return;
+    this.deps.log.warn(
+      `Personal channels in category "${category.name}" (${category.id}) cannot inherit its overrides for ` +
+        `${permissionNames(gap).join(', ')}: my role lacks those permissions, and Discord only lets me set permissions I hold.`,
+    );
   }
 
   /**
@@ -392,6 +410,17 @@ export class ChannelService {
       return undefined;
     }
   }
+}
+
+function inheritedOverwrites(category: CategoryChannel | null): Overwrite[] {
+  return (
+    category?.permissionOverwrites.cache.map((overwrite) => ({
+      id: overwrite.id,
+      type: overwrite.type,
+      allow: overwrite.allow.bitfield,
+      deny: overwrite.deny.bitfield,
+    })) ?? []
+  );
 }
 
 function explainCreateFailure(error: unknown): string {
