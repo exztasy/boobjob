@@ -7,6 +7,7 @@ import {
   type Client,
   type Guild,
   type GuildBasedChannel,
+  type GuildChannelCreateOptions,
   type GuildMember,
   type VoiceChannel,
 } from 'discord.js';
@@ -38,6 +39,8 @@ interface OverwriteSubject extends AccessLists {
   ownerId: string;
   privacy: Privacy;
 }
+
+const NO_ACCESS: AccessLists = Object.freeze({ allowed: [], blocked: [] });
 
 /** Creates, secures and removes the personal voice channels. */
 export class ChannelService {
@@ -117,42 +120,57 @@ export class ChannelService {
 
     this.logInheritanceGap(hub.parent, me);
     const reason = `Temporary voice channel for ${member.user.tag}`;
-    const fixed = {
-      type: ChannelType.GuildVoice as const,
-      parent: hub.parentId,
-      permissionOverwrites: this.overwritesFor(guild, me, hub.parent, {
-        ownerId: member.id,
-        privacy: settings.privacy,
-        ...access,
-      }),
-      reason,
-    };
+    const overwritesWith = (lists: AccessLists): Overwrite[] =>
+      this.overwritesFor(guild, me, hub.parent, { ownerId: member.id, privacy: settings.privacy, ...lists });
+    const savedOverwrites = overwritesWith(access);
+    const fixed = { type: ChannelType.GuildVoice as const, parent: hub.parentId, reason };
+
     // Something a member saved earlier can stop being acceptable: a region Discord retired,
     // a bitrate above the current boost level, a name the server now filters. Getting a
     // channel matters more than any one setting, so give up on them step by step: first
     // the ones that depend on the server, then the custom name, then the member's own name.
-    const attempts = [
+    const attempts: { access: AccessLists; options: Omit<GuildChannelCreateOptions, 'type' | 'parent' | 'reason'> }[] = [
       {
-        name: settings.name,
-        userLimit: settings.userLimit,
-        bitrate: settings.bitrate,
-        videoQualityMode: settings.videoQuality,
-        ...(settings.rtcRegion ? { rtcRegion: settings.rtcRegion } : {}),
+        access,
+        options: {
+          name: settings.name,
+          userLimit: settings.userLimit,
+          bitrate: settings.bitrate,
+          videoQualityMode: settings.videoQuality,
+          ...(settings.rtcRegion ? { rtcRegion: settings.rtcRegion } : {}),
+          permissionOverwrites: savedOverwrites,
+        },
       },
-      { name: settings.name, userLimit: settings.userLimit },
-      { name: defaultChannelName(member.displayName), userLimit: settings.userLimit },
-      { name: FALLBACK_CHANNEL_NAME },
+      { access, options: { name: settings.name, userLimit: settings.userLimit, permissionOverwrites: savedOverwrites } },
+      {
+        access,
+        options: {
+          name: defaultChannelName(member.displayName),
+          userLimit: settings.userLimit,
+          permissionOverwrites: savedOverwrites,
+        },
+      },
+      { access, options: { name: FALLBACK_CHANNEL_NAME, permissionOverwrites: savedOverwrites } },
     ];
+    if (access.allowed.length > 0 || access.blocked.length > 0) {
+      // Last resort: if even that is refused, the saved allow and block lists are all that is left to blame.
+      attempts.push({
+        access: NO_ACCESS,
+        options: { name: settings.name, userLimit: settings.userLimit, permissionOverwrites: overwritesWith(NO_ACCESS) },
+      });
+    }
 
     let channel: VoiceChannel | undefined;
+    let applied = access;
     for (const [index, attempt] of attempts.entries()) {
       try {
-        channel = await guild.channels.create({ ...fixed, ...attempt });
+        channel = await guild.channels.create({ ...fixed, ...attempt.options });
+        applied = attempt.access;
         break;
       } catch (error) {
         const last = index === attempts.length - 1;
         if (last || !hasApiCode(error, RESTJSONErrorCodes.InvalidFormBodyOrContentType)) throw error;
-        log.warn(`Discord rejected the saved settings of ${member.user.tag} in guild ${guild.id}; retrying with defaults`, error);
+        log.warn(`Discord rejected the saved settings of ${member.user.tag} in guild ${guild.id}; retrying with plainer ones`, error);
       }
     }
     if (!channel) return;
@@ -166,8 +184,14 @@ export class ChannelService {
         privacy: settings.privacy,
         createdAt: Date.now(),
       },
-      access,
+      applied,
     );
+    const listsWereRejected = applied !== access;
+    if (listsWereRejected) {
+      // Keeping them would make every future channel go through the same failures.
+      store.changeProfileAccess(guild.id, member.id, 'allow', [], saved.allowed);
+      store.changeProfileAccess(guild.id, member.id, 'block', [], saved.blocked);
+    }
 
     // Only pull them out of the hub: if they wandered off meanwhile, leave them where they are.
     if (guild.voiceStates.cache.get(member.id)?.channelId !== hub.id) {
@@ -185,6 +209,17 @@ export class ChannelService {
     await panels
       .post(channel, { mentionOwner: true })
       .catch((error: unknown) => log.warn(`Could not post the control panel in channel ${channel.id}`, error));
+
+    if (listsWereRejected) {
+      await channel
+        .send({
+          content:
+            `⚠️ ${userMention(member.id)} Discord did not accept your saved allowed and blocked lists ` +
+            '(someone on them may have left the server), so I have cleared them. You can add people again with the buttons above.',
+          allowedMentions: { parse: [], users: [member.id] },
+        })
+        .catch(() => undefined);
+    }
   }
 
   private hubOf(guild: Guild, userId: string): VoiceChannel | null {

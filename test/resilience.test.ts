@@ -283,6 +283,31 @@ test('a saved name the server now rejects falls back to the default name', async
   assert.equal(fake.channels.get(fake.channelOf(alice)!)!.name, "alice's channel");
 });
 
+test('if Discord refuses a channel because of the saved lists, the member still gets one and is told the lists were cleared', async (t) => {
+  const world = await createWorld();
+  t.after(() => destroyWorld(world));
+  const { fake, bot, alice, bob, carol, hub } = world;
+  bot.store.updateProfile(fake.guildId, alice, { name: 'Movie night' });
+  bot.store.changeProfileAccess(fake.guildId, alice, 'allow', [bob], []);
+  bot.store.changeProfileAccess(fake.guildId, alice, 'block', [carol], []);
+  // Every attempt that includes the lists is refused, whatever the name and settings.
+  const invalid = { code: 50035, message: 'Invalid Form Body' };
+  for (let attempt = 0; attempt < 4; attempt++) fake.failNext('POST', CREATE_CHANNEL, 400, invalid);
+
+  fake.join(alice, hub);
+
+  await until(() => fake.channelOf(alice) !== hub && fake.channelOf(alice) !== null, 'alice to get a channel anyway');
+  const channelId = fake.channelOf(alice)!;
+  assert.equal(fake.channels.get(channelId)!.name, 'Movie night', 'the name was not the problem, so it is kept');
+  assert.ok(!fake.canSee(bob, channelId), 'the channel is private, just without the lists');
+  assert.deepEqual(bot.store.getChannelAccess(channelId), { allowed: [], blocked: [] });
+  assert.deepEqual(bot.store.getProfileAccess(fake.guildId, alice), { allowed: [], blocked: [] }, 'so the next channel is not held up again');
+  await until(
+    () => fake.messagesIn(channelId).some((message) => /did not accept your saved allowed and blocked lists/u.test(message.content)),
+    'the owner to be told',
+  );
+});
+
 test('when the server is out of channels the member is told why', async (t) => {
   const world = await createWorld();
   t.after(() => destroyWorld(world));

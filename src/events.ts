@@ -70,7 +70,9 @@ export function registerEvents(context: BotContext): void {
     if (changed) panels.schedule(after.id);
   });
 
-  // A guild that (re)appears may have changed while we could not see it.
+  // A guild that (re)appears may have changed while we could not see it. While starting up,
+  // discord.js reports every guild as newly available, which overlaps with the sweep above;
+  // reconciling is idempotent, so doing it twice is harmless and neither path is relied on alone.
   client.on(Events.GuildCreate, reconcile);
   client.on(Events.GuildAvailable, reconcile);
 
