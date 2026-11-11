@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, test, type TestContext } from 'node:test';
-import { openDatabase } from '../src/storage/database.js';
+import { DatabaseError, openDatabase } from '../src/storage/database.js';
 import { Store } from '../src/storage/store.js';
 
 const GUILD = 'guild';
@@ -264,6 +264,15 @@ describe('hubs', () => {
   });
 });
 
+function schemaVersion(file: string): number {
+  const raw = new DatabaseSync(file);
+  try {
+    return Number((raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+  } finally {
+    raw.close();
+  }
+}
+
 describe('the database file', () => {
   function tempFile(t: TestContext): string {
     const directory = mkdtempSync(path.join(tmpdir(), 'voice-bot-test-'));
@@ -290,5 +299,58 @@ describe('the database file', () => {
     raw.close();
 
     assert.throws(() => openDatabase(file), /newer version of the bot/u);
+  });
+
+  // Permission bits do not stop root, so these only mean something as an ordinary user,
+  // which is also how the bot runs in its container.
+  const isRoot = process.getuid?.() === 0;
+
+  test('is refused at startup when it can be read but not written', { skip: isRoot && 'running as root' }, (t) => {
+    // What copying a backup into the container as root leaves behind: a file the bot's
+    // user may read but not change, in a folder that is its own.
+    const file = tempFile(t);
+    new Store(openDatabase(file)).close();
+    chmodSync(file, 0o444);
+
+    assert.throws(
+      () => openDatabase(file),
+      (error: unknown) =>
+        error instanceof DatabaseError &&
+        error.message.includes(`Cannot open the database at ${file} for writing`) &&
+        /belong to the user the bot runs as/u.test(error.message),
+    );
+  });
+
+  test('is refused with an explanation when its folder cannot be created', { skip: isRoot && 'running as root' }, (t) => {
+    const locked = path.dirname(tempFile(t));
+    mkdirSync(locked, { recursive: true });
+    chmodSync(locked, 0o555);
+
+    try {
+      assert.throws(() => openDatabase(path.join(locked, 'deeper', 'bot.sqlite')), DatabaseError);
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  });
+
+  test('keeps its schema version when it is opened again', (t) => {
+    // Checking that the file is writable rewrites the version field; it must not change it.
+    const file = tempFile(t);
+    new Store(openDatabase(file)).close();
+    const versionAfterFirstOpen = schemaVersion(file);
+    new Store(openDatabase(file)).close();
+
+    assert.ok(versionAfterFirstOpen > 0);
+    assert.equal(schemaVersion(file), versionAfterFirstOpen);
+  });
+
+  test('opens normally when it is writable', (t) => {
+    const file = tempFile(t);
+    new Store(openDatabase(file)).close();
+
+    const store = new Store(openDatabase(file));
+    t.after(() => store.close());
+    store.addHub(GUILD, 'h1');
+    assert.equal(store.listHubs(GUILD).length, 1);
   });
 });

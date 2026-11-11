@@ -2,6 +2,7 @@ import { GatewayCloseCodes } from 'discord.js';
 import { Bot } from './bot.js';
 import { ConfigError, loadConfig } from './config.js';
 import { createLogger } from './logger.js';
+import { DatabaseError } from './storage/database.js';
 
 async function main(): Promise<void> {
   let config;
@@ -29,18 +30,26 @@ async function main(): Promise<void> {
     );
   }
 
-  const bot = new Bot({
-    token: config.token,
-    databasePath: config.databasePath,
-    log,
-    // Discord will not let this connection be re-established, so all that is left is to
-    // stop. Exiting with an error lets whatever supervises the process notice and react,
-    // instead of the bot sitting there connected to nothing.
-    onFatalDisconnect: (closeCode) => {
-      log.error(describeFatalClose(closeCode));
-      shutdown(1);
-    },
-  });
+  let bot: Bot;
+  try {
+    bot = new Bot({
+      token: config.token,
+      databasePath: config.databasePath,
+      log,
+      // Discord will not let this connection be re-established, so all that is left is to
+      // stop. Exiting with an error lets whatever supervises the process notice and react,
+      // instead of the bot sitting there connected to nothing.
+      onFatalDisconnect: (closeCode) => {
+        log.error(describeFatalClose(closeCode));
+        shutdown(1);
+      },
+    });
+  } catch (error) {
+    if (!(error instanceof DatabaseError)) throw error;
+    log.error(error.message);
+    process.exitCode = 1;
+    return;
+  }
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {

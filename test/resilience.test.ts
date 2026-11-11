@@ -219,6 +219,10 @@ test('a clean-up pass that runs while a channel is being set up leaves it alone'
   await bot.context.channels.sweep();
 
   await until(() => fake.channelOf(alice) === channelOwnedBy(world, alice), 'alice to arrive in her channel');
+  // The clean-up pass also saw alice waiting in the hub and asked for a channel for her.
+  // Give that request time to run: it must find her already served.
+  await settle(150);
+  assert.equal(fake.requestsTo('POST', CREATE_CHANNEL).length, 1, 'no second channel was made for her');
   assert.equal(fake.requestsTo('DELETE', /^\/channels\/\d+$/u).length, 0, 'the half-ready channel was not removed');
   assertClean(world);
 });

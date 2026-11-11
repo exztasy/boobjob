@@ -79,15 +79,39 @@ const MIGRATIONS: readonly string[] = [
   `,
 ];
 
+/** A problem with the database that the person running the bot has to sort out. */
+export class DatabaseError extends Error {
+  override name = 'DatabaseError';
+}
+
 /** Opens (creating if needed) the database and brings its schema up to date. */
 export function openDatabase(file: string): DatabaseSync {
-  if (file !== ':memory:') mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+  const location = file === ':memory:' ? file : path.resolve(file);
 
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA synchronous = NORMAL');
-  db.exec('PRAGMA busy_timeout = 5000');
-  db.exec('PRAGMA foreign_keys = ON');
+  let db: DatabaseSync | undefined;
+  try {
+    if (file !== ':memory:') mkdirSync(path.dirname(location), { recursive: true });
+    db = new DatabaseSync(file);
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA synchronous = NORMAL');
+    db.exec('PRAGMA busy_timeout = 5000');
+    db.exec('PRAGMA foreign_keys = ON');
+    // A database that can be read but not written opens without complaint, and SQLite even
+    // lets a transaction begin on it; only somebody's first change would fail. Writing a
+    // header field back with the value it already has is a real write that changes nothing,
+    // and finds out right away.
+    const current = db.prepare('PRAGMA user_version').get() as { user_version: number };
+    db.exec(`PRAGMA user_version = ${Number(current.user_version)}`);
+  } catch (error) {
+    db?.close();
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new DatabaseError(
+      `Cannot open the database at ${location} for writing (${reason}). ` +
+        'Check that its folder exists and that the folder and the file belong to the user the bot runs as.',
+      { cause: error },
+    );
+  }
+
   migrate(db);
   return db;
 }
@@ -97,7 +121,7 @@ function migrate(db: DatabaseSync): void {
   let version = Number(row.user_version);
 
   if (version > MIGRATIONS.length) {
-    throw new Error(
+    throw new DatabaseError(
       `The database is at schema version ${version}, but this build only knows up to ${MIGRATIONS.length}. ` +
         'It was probably written by a newer version of the bot.',
     );

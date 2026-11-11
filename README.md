@@ -14,10 +14,10 @@ A Discord bot for dynamic voice channels. A member joins a hub channel and gets 
 
 ## Requirements
 
-- Node.js 22.13 or newer
 - A Discord application with a bot user
+- Either Docker with the Compose plugin, or Node.js 22.13 or newer
 
-Settings are stored in a SQLite file using Node's built-in SQLite, so there is nothing else to install and nothing native to compile.
+Settings are stored in a SQLite file using Node's built-in SQLite, so there is no database server to run and nothing native to compile.
 
 ## Setup
 
@@ -31,14 +31,30 @@ No privileged gateway intents are needed. Leave them switched off.
 ### 2. Configure and start
 
 ```bash
-npm install
-```
-
-```bash
 cp .env.example .env
 ```
 
-Put the token into `.env` as `DISCORD_TOKEN`, then:
+Put the token into `.env` as `DISCORD_TOKEN`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | (required) | The bot token |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
+| `DATABASE_PATH` | `./data/bot.sqlite` | Where settings are stored; created on first start. Ignored with Docker Compose, which keeps the database in a volume. |
+
+**With Docker** (the easy way to run it on a server):
+
+```bash
+docker compose up -d --build
+```
+
+That builds the image and starts the bot in the background. It comes back by itself after a crash or a reboot, and its settings are kept in a Docker volume. See [Running with Docker](#running-with-docker) for updating, logs and backups.
+
+**Without Docker:**
+
+```bash
+npm install
+```
 
 ```bash
 npm run build
@@ -48,15 +64,9 @@ npm run build
 npm start
 ```
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `DISCORD_TOKEN` | (required) | The bot token |
-| `DATABASE_PATH` | `./data/bot.sqlite` | Where settings are stored; created on first start |
-| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
-
 ### 3. Invite it
 
-On startup the bot logs an invite link with the right permissions already selected. Open it and add the bot to your server.
+On startup the bot logs an invite link with the right permissions already selected (with Docker: `docker compose logs`). Open it and add the bot to your server.
 
 ### 4. Create a hub
 
@@ -165,9 +175,89 @@ Moderators without Administrator cannot see hidden channels. Server administrato
 
 If you remove the bot from a server while someone is muted or deafened through it, a moderator has to lift that by hand.
 
+## Running with Docker
+
+`compose.yaml` builds the image from this repository and runs it with a restart policy, a named volume for the database, and log rotation. The image contains only the compiled bot and its runtime dependencies, and the bot runs as an unprivileged user.
+
+Follow the log:
+
+```bash
+docker compose logs -f
+```
+
+Update to a newer version of the bot (settings are kept):
+
+```bash
+git pull
+```
+
+```bash
+docker compose up -d --build
+```
+
+Apply a change to `.env`:
+
+```bash
+docker compose up -d
+```
+
+Stop the bot. The volume, and with it everyone's settings, stays:
+
+```bash
+docker compose down
+```
+
+`docker compose down -v` also deletes the volume. Only use it if you want to start from scratch.
+
+If something is wrong, for example a token that was reset, the bot says so in the log and exits, and Docker keeps restarting it until the problem is fixed.
+
+### Backup and restore
+
+The database is the file `/app/data/bot.sqlite` in the volume. Stop the bot before copying it, so that the file is complete.
+
+Back up:
+
+```bash
+docker compose stop
+```
+
+```bash
+docker compose cp bot:/app/data/bot.sqlite ./bot-backup.sqlite
+```
+
+```bash
+docker compose start
+```
+
+Restore:
+
+```bash
+docker compose stop
+```
+
+```bash
+docker compose cp ./bot-backup.sqlite bot:/app/data/bot.sqlite
+```
+
+```bash
+docker compose run --rm --user root bot sh -c 'rm -f data/bot.sqlite-wal data/bot.sqlite-shm; chown node:node data/bot.sqlite'
+```
+
+```bash
+docker compose start
+```
+
+The third command matters: a file copied into a container belongs to root, and the bot refuses to start on a database it cannot write to. It also clears leftovers of the database that was there before.
+
+### Details
+
+- **Node version.** The image is built on Node 26. To use another release line (22 or newer), change `NODE_VERSION` at the top of the `Dockerfile`.
+- **Without Compose.** `docker build -t boobjob .` and then `docker run -d --name boobjob --restart unless-stopped --init --env-file .env -v boobjob-data:/app/data boobjob`.
+- **A host folder instead of a volume.** If you mount a folder from the host on `/app/data`, it has to be writable by user id 1000, which is what the bot runs as: `sudo chown 1000:1000 ./data`.
+
 ## Data
 
-Everything is in the SQLite file at `DATABASE_PATH`: the hubs, each member's saved settings and lists, and the channels currently open. Back up that file to keep your members' settings. Deleting it resets the bot; channels that are open at that moment are no longer managed and have to be removed by hand.
+Everything is in one SQLite file: the hubs, each member's saved settings and lists, and the channels currently open. With Docker it lives in the volume (see [Backup and restore](#backup-and-restore)); otherwise it is the file at `DATABASE_PATH`. Back it up to keep your members' settings. Deleting it resets the bot; channels that are open at that moment are no longer managed and have to be removed by hand.
 
 ## Development
 
@@ -198,4 +288,6 @@ src/
   ui/               the control panel and its menus
   storage/          SQLite schema and queries
 test/               unit tests and end-to-end tests against the fake Discord
+Dockerfile          the image: compiled code, runtime dependencies, unprivileged user
+compose.yaml        how to run it: restart policy, data volume, log rotation
 ```
