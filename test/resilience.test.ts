@@ -298,7 +298,8 @@ test('if Discord refuses a channel because of the saved lists, the member still 
 
   await until(() => fake.channelOf(alice) !== hub && fake.channelOf(alice) !== null, 'alice to get a channel anyway');
   const channelId = fake.channelOf(alice)!;
-  assert.equal(fake.channels.get(channelId)!.name, 'Movie night', 'the name was not the problem, so it is kept');
+  assert.equal(fake.channels.get(channelId)!.name, 'Voice channel', 'the plainest channel possible');
+  assert.equal(bot.store.getProfile(fake.guildId, alice)?.name, 'Movie night', 'the saved name is kept for next time');
   assert.ok(!fake.canSee(bob, channelId), 'the channel is private, just without the lists');
   assert.deepEqual(bot.store.getChannelAccess(channelId), { allowed: [], blocked: [] });
   assert.deepEqual(bot.store.getProfileAccess(fake.guildId, alice), { allowed: [], blocked: [] }, 'so the next channel is not held up again');
@@ -484,11 +485,11 @@ test('with only the invited permissions the bot runs private channels on a serve
   assert.deepEqual(fake.rejected, []);
   const problems = world.log.problems();
   assert.equal(problems.length, 1, problems.join('\n'));
-  assert.match(problems[0]!, /cannot inherit its overrides for Manage Messages, Mention Everyone/u);
+  assert.match(problems[0]!, /cannot inherit its overrides for Manage Messages, Mention @everyone, @here and All Roles/u);
   const report = await fake.command(fake.ownerId, world.general, 'voicehub', 'list');
   assert.match(
     report.message!.content,
-    /\*\*Voice channels\*\* has role or member overrides for \*\*Manage Messages\*\*, \*\*Mention Everyone\*\*/u,
+    /\*\*Voice channels\*\* has role or member overrides for \*\*Manage Messages\*\*, \*\*Mention @everyone, @here and All Roles\*\*/u,
   );
 });
 

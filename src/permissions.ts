@@ -48,6 +48,20 @@ export function permissionNames(permissions: bigint): string[] {
   return new PermissionsBitField(permissions).toArray().map(permissionLabel);
 }
 
+/** Permissions whose name in Discord's role settings is not simply their API name spelled out. */
+const SETTINGS_LABELS: Record<string, string> = {
+  ViewChannel: 'View Channels',
+  ManageGuild: 'Manage Server',
+  Stream: 'Video',
+  UseVAD: 'Use Voice Activity',
+  CreateInstantInvite: 'Create Invite',
+  UseEmbeddedActivities: 'Use Activities',
+  SendTTSMessages: 'Send Text-to-Speech Messages',
+  MentionEveryone: 'Mention @everyone, @here and All Roles',
+  ModerateMembers: 'Timeout Members',
+};
+
+/** The name an admin will find in Server Settings → Roles. */
 function permissionLabel(name: string): string {
-  return name.replace(/([a-z])([A-Z])/gu, '$1 $2');
+  return SETTINGS_LABELS[name] ?? name.replace(/([a-z])([A-Z])|([A-Z]+)([A-Z][a-z])/gu, '$1$3 $2$4');
 }

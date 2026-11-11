@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { VideoQualityMode } from 'discord.js';
+import { PermissionFlagsBits, VideoQualityMode } from 'discord.js';
+import { BOT_CHANNEL_PERMISSIONS } from '../src/domain/overwrites.js';
 import { RenameLimiter } from '../src/domain/renameLimiter.js';
 import {
   FALLBACK_CHANNEL_NAME,
@@ -12,6 +13,7 @@ import {
   sanitizeName,
   truncate,
 } from '../src/domain/settings.js';
+import { INVITE_PERMISSIONS, permissionNames } from '../src/permissions.js';
 import { KeyedQueue } from '../src/util/keyedQueue.js';
 
 const context = { displayName: 'Alice', hubBitrate: 64_000, maxBitrate: 96_000 };
@@ -122,6 +124,31 @@ test('bitrates are kept within what Discord and the server allow', () => {
   assert.equal(clampBitrate(1_000, 96_000), 8_000);
   assert.equal(clampBitrate(500_000, 96_000), 96_000);
   assert.equal(clampBitrate(64_000, 96_000), 64_000);
+});
+
+describe('permission names shown to admins', () => {
+  test('match what Discord calls them in the role settings', () => {
+    const P = PermissionFlagsBits;
+
+    assert.deepEqual(permissionNames(P.ManageChannels | P.ManageRoles | P.MoveMembers), ['Manage Channels', 'Move Members', 'Manage Roles']);
+    assert.deepEqual(permissionNames(P.ViewChannel), ['View Channels']);
+    assert.deepEqual(permissionNames(P.Stream | P.UseVAD), ['Video', 'Use Voice Activity']);
+    assert.deepEqual(permissionNames(P.SendTTSMessages), ['Send Text-to-Speech Messages']);
+    assert.deepEqual(permissionNames(P.UseExternalEmojis), ['Use External Emojis']);
+    assert.deepEqual(permissionNames(0n), []);
+  });
+
+  test('the invite asks for everything the bot needs, and not for Administrator', () => {
+    const P = PermissionFlagsBits;
+    const needed = P.ViewChannel | P.Connect | P.ManageChannels | P.ManageRoles | P.MoveMembers | P.MuteMembers | P.DeafenMembers | P.SendMessages;
+
+    assert.equal(INVITE_PERMISSIONS & needed, needed);
+    assert.equal(INVITE_PERMISSIONS & BOT_CHANNEL_PERMISSIONS, BOT_CHANNEL_PERMISSIONS, 'it can grant itself what it needs on a channel');
+    assert.equal(INVITE_PERMISSIONS & P.Speak, P.Speak, 'so that mute roles carry over');
+    for (const powerful of [P.Administrator, P.ManageGuild, P.KickMembers, P.BanMembers, P.ManageMessages, P.MentionEveryone, P.ManageWebhooks]) {
+      assert.equal(INVITE_PERMISSIONS & powerful, 0n);
+    }
+  });
 });
 
 describe('the rename limiter', () => {

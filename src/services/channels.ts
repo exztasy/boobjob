@@ -153,10 +153,11 @@ export class ChannelService {
       { access, options: { name: FALLBACK_CHANNEL_NAME, permissionOverwrites: savedOverwrites } },
     ];
     if (access.allowed.length > 0 || access.blocked.length > 0) {
-      // Last resort: if even that is refused, the saved allow and block lists are all that is left to blame.
+      // Last resort: if even the plainest channel is refused, the saved allow and block
+      // lists are all that is left to blame, so try once more without them.
       attempts.push({
         access: NO_ACCESS,
-        options: { name: settings.name, userLimit: settings.userLimit, permissionOverwrites: overwritesWith(NO_ACCESS) },
+        options: { name: FALLBACK_CHANNEL_NAME, permissionOverwrites: overwritesWith(NO_ACCESS) },
       });
     }
 
