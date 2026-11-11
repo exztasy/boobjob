@@ -1,0 +1,23 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    # A tiny init process as PID 1: forwards signals and reaps stray processes.
+    init: true
+    # DISCORD_TOKEN and LOG_LEVEL come from here.
+    env_file: .env
+    environment:
+      # Always inside the volume below, whatever .env says, so that settings
+      # survive rebuilding or recreating the container.
+      DATABASE_PATH: /app/data/bot.sqlite
+    volumes:
+      - data:/app/data
+    # Without limits Docker keeps every log line forever.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  data:

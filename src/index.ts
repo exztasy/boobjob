@@ -1,3 +1,4 @@
+import { GatewayCloseCodes } from 'discord.js';
 import { Bot } from './bot.js';
 import { ConfigError, loadConfig } from './config.js';
 import { createLogger } from './logger.js';
@@ -14,23 +15,39 @@ async function main(): Promise<void> {
   }
 
   const log = createLogger(config.logLevel);
-  const bot = new Bot({ token: config.token, databasePath: config.databasePath, log });
 
   let stopping = false;
-  const shutdown = (signal: string): void => {
+  function shutdown(exitCode: number): void {
     if (stopping) return;
     stopping = true;
-    log.info(`Received ${signal}, shutting down`);
     bot.stop().then(
-      () => process.exit(0),
+      () => process.exit(exitCode),
       (error: unknown) => {
         log.error('Shutdown did not complete cleanly', error);
         process.exit(1);
       },
     );
-  };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  }
+
+  const bot = new Bot({
+    token: config.token,
+    databasePath: config.databasePath,
+    log,
+    // Discord will not let this connection be re-established, so all that is left is to
+    // stop. Exiting with an error lets whatever supervises the process notice and react,
+    // instead of the bot sitting there connected to nothing.
+    onFatalDisconnect: (closeCode) => {
+      log.error(describeFatalClose(closeCode));
+      shutdown(1);
+    },
+  });
+
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      log.info(`Received ${signal}, shutting down`);
+      shutdown(0);
+    });
+  }
 
   // A handler that slips up should cost one action, not the whole bot.
   process.on('unhandledRejection', (reason) => log.error('Unhandled promise rejection', reason));
@@ -50,6 +67,14 @@ async function main(): Promise<void> {
 
 function isInvalidToken(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'TokenInvalid';
+}
+
+function describeFatalClose(closeCode: number): string {
+  if (closeCode === GatewayCloseCodes.AuthenticationFailed) {
+    return 'Discord closed the connection because the bot token is no longer valid. If the token was reset, put the new one in DISCORD_TOKEN.';
+  }
+  const name = GatewayCloseCodes[closeCode] ?? 'unknown reason';
+  return `Discord closed the connection and will not accept a reconnect (close code ${closeCode}, ${name}).`;
 }
 
 await main();

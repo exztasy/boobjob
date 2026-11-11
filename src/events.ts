@@ -7,7 +7,7 @@ import { isVoiceChannel } from './util/discord.js';
 
 /** Connects Discord's events to the services. */
 export function registerEvents(context: BotContext): void {
-  const { client, store, log, channels, panels, sanctions } = context;
+  const { client, store, log, voice, channels, panels, sanctions } = context;
 
   const reconcile = (guild: Guild): void => {
     channels
@@ -35,6 +35,9 @@ export function registerEvents(context: BotContext): void {
     const guild = newState.guild;
     const left = oldState.channelId;
     const joined = newState.channelId;
+
+    // First of all, release whoever is waiting for exactly this change to show up.
+    voice.notify(guild.id, newState.id);
 
     if (left !== joined) {
       if (left && store.getTempChannel(left)) {

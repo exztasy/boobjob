@@ -205,6 +205,24 @@ test('an owner who is alone and goes back to the hub gets a fresh channel', asyn
   assertClean(world);
 });
 
+test('a clean-up pass that runs while a channel is being set up leaves it alone', async (t) => {
+  const world = await createWorld();
+  t.after(() => destroyWorld(world));
+  const { fake, bot, alice, hub } = world;
+
+  // The channel exists, but moving alice into it takes a moment, so it is empty for now.
+  fake.delayNext('PATCH', new RegExp(`/members/${alice}$`, 'u'), 80);
+  fake.join(alice, hub);
+  await until(() => bot.store.listTempChannels(fake.guildId).length === 1, 'the channel to be created');
+  assert.equal(fake.channelOf(alice), hub, 'alice has not been moved yet');
+
+  await bot.context.channels.sweep();
+
+  await until(() => fake.channelOf(alice) === channelOwnedBy(world, alice), 'alice to arrive in her channel');
+  assert.equal(fake.requestsTo('DELETE', /^\/channels\/\d+$/u).length, 0, 'the half-ready channel was not removed');
+  assertClean(world);
+});
+
 test('creating channels back to back is slowed down by the cooldown', async (t) => {
   const world = await createWorld({ tuning: { createCooldownMs: 250 } });
   t.after(() => destroyWorld(world));
@@ -337,6 +355,62 @@ test('an empty channel that could not be deleted is removed by the next sweep', 
 
   assert.ok(!fake.channels.has(channelId));
   assert.equal(bot.store.getTempChannel(channelId), undefined);
+});
+
+// ── the connection to Discord ─────────────────────────────────────────────
+
+test('shutting down does not hang when Discord has stopped answering', async (t) => {
+  const world = await createWorld({ tuning: { shutdownTimeoutMs: 150 } });
+  t.after(() => world.fake.stop());
+  const { fake, bot } = world;
+  fake.freezeGateway();
+
+  const startedAt = Date.now();
+  await bot.stop();
+  const took = Date.now() - startedAt;
+
+  assert.ok(took >= 140, `it gave Discord its chance to confirm (${took} ms)`);
+  assert.ok(took < 2_000, `but did not wait for long (${took} ms)`);
+  assert.throws(() => bot.store.listHubs(fake.guildId), 'the database has been closed');
+  assert.ok(world.log.problems().some((problem) => /did not confirm the disconnect/u.test(problem)), 'and the reason is logged');
+  await bot.stop(); // asking twice is harmless
+});
+
+test('shutting down is immediate when Discord answers', async (t) => {
+  const world = await createWorld();
+  t.after(() => world.fake.stop());
+
+  const startedAt = Date.now();
+  await world.bot.stop();
+
+  assert.ok(Date.now() - startedAt < 1_000);
+  assert.deepEqual(world.log.problems(), []);
+});
+
+test('the caller is told when Discord closes the connection for good', async (t) => {
+  const reported: number[] = [];
+  const world = await createWorld({ onFatalDisconnect: (closeCode) => reported.push(closeCode) });
+  t.after(() => destroyWorld(world));
+
+  // What Discord does to a connected bot whose token has just been reset.
+  world.fake.closeGateway(4004, 'Authentication failed.');
+
+  await until(() => reported.length > 0, 'the fatal disconnect to be reported');
+  assert.deepEqual(reported, [4004]);
+});
+
+test('an ordinary dropped connection is not treated as fatal, and the bot carries on after reconnecting', async (t) => {
+  const reported: number[] = [];
+  const world = await createWorld({ onFatalDisconnect: (closeCode) => reported.push(closeCode) });
+  t.after(() => destroyWorld(world));
+  const { fake, alice } = world;
+
+  fake.closeGateway(4000, 'Unknown error.');
+  await until(() => fake.gatewayConnections === 2, 'the bot to reconnect', 10_000);
+
+  const { channelId } = await createChannelFor(world, alice);
+  assert.ok(fake.channels.has(channelId));
+  assert.deepEqual(reported, []);
 });
 
 // ── changes made behind the bot's back ────────────────────────────────────

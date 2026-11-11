@@ -7,7 +7,6 @@ import { FakeDiscord, type FakeDiscordOptions, type Json } from './fakeDiscord.j
 /** Timings short enough for tests to run in milliseconds. */
 export const FAST: Partial<Tuning> = {
   createCooldownMs: 0,
-  emptyGraceMs: 0,
   panelDebounceMs: 5,
   sweepIntervalMs: 60 * 60_000,
   voiceSettleMs: 500,
@@ -69,12 +68,13 @@ export interface WorldOptions extends Partial<FakeDiscordOptions> {
   databasePath?: string;
   /** Set to `false` to start without the standard hub being registered. */
   registerHub?: boolean;
+  onFatalDisconnect?: (closeCode: number) => void;
   /** Runs after the standard server is built and before the bot connects. */
   prepare?: (fake: FakeDiscord, ids: StandardIds) => void;
 }
 
 export async function createWorld(options: WorldOptions = {}): Promise<World> {
-  const { tuning, databasePath, prepare, registerHub = true, ...fakeOptions } = options;
+  const { tuning, databasePath, prepare, registerHub = true, onFatalDisconnect, ...fakeOptions } = options;
   const fake = new FakeDiscord({ botPermissions: PermissionFlagsBits.Administrator, ...fakeOptions });
 
   const category = fake.addCategory('Voice channels');
@@ -93,7 +93,7 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
   prepare?.(fake, ids);
 
   await fake.start();
-  const { bot, log } = await startBot(fake, { tuning, databasePath });
+  const { bot, log } = await startBot(fake, { tuning, databasePath, onFatalDisconnect });
   if (registerHub) bot.store.addHub(fake.guildId, hub);
   return { fake, bot, log, ...ids };
 }
@@ -101,7 +101,7 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
 /** Starts a bot against the fake and waits until it has finished starting up. */
 export async function startBot(
   fake: FakeDiscord,
-  options: { tuning?: Partial<Tuning>; databasePath?: string } = {},
+  options: { tuning?: Partial<Tuning>; databasePath?: string; onFatalDisconnect?: (closeCode: number) => void } = {},
 ): Promise<{ bot: Bot; log: RecordingLogger }> {
   const log = new RecordingLogger();
   const registrationsBefore = fake.requestsTo('PUT', /\/commands$/u).length;
@@ -111,6 +111,7 @@ export async function startBot(
     log,
     tuning: { ...FAST, ...options.tuning },
     clientOptions: { rest: { makeRequest: fake.makeRequest } },
+    onFatalDisconnect: options.onFatalDisconnect,
   });
   await bot.start();
   await until(

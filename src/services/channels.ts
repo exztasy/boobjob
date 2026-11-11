@@ -20,6 +20,7 @@ import type { AccessLists, Privacy, Store } from '../storage/store.js';
 import type { Tuning } from '../tuning.js';
 import { describeError, hasApiCode, humanCount, isVoiceChannel, sleep, voiceStatesIn } from '../util/discord.js';
 import type { KeyedQueue } from '../util/keyedQueue.js';
+import type { VoiceStateWaiter } from '../util/voiceWaiter.js';
 import type { PanelService } from './panels.js';
 import type { RenameService } from './renames.js';
 import type { SanctionService } from './sanctions.js';
@@ -28,6 +29,7 @@ export interface ChannelDeps {
   client: Client;
   store: Store;
   queue: KeyedQueue;
+  voice: VoiceStateWaiter;
   panels: PanelService;
   sanctions: SanctionService;
   renames: RenameService;
@@ -48,6 +50,11 @@ export class ChannelService {
   private readonly lastCreated = new Map<string, number>();
   /** Channels whose deletion is under way; they must not be handed back to their owner. */
   private readonly deleting = new Set<string>();
+  /**
+   * Channels that exist but whose owner has not been moved in yet. They are
+   * empty for a moment, and must not be mistaken for abandoned ones.
+   */
+  private readonly settingUp = new Set<string>();
   private readonly lastFailureNotice = new Map<string, number>();
   /** What was last logged as impossible to inherit, per category, so the log says it once. */
   private readonly reportedGaps = new Map<string, bigint>();
@@ -76,6 +83,7 @@ export class ChannelService {
     if (existing) {
       try {
         await member.voice.setChannel(existing, 'Returning the owner to their voice channel');
+        await this.leftHub(member, hub);
         return;
       } catch (error) {
         if (hasApiCode(error, RESTJSONErrorCodes.TargetUserIsNotConnectedToVoice)) return;
@@ -176,35 +184,41 @@ export class ChannelService {
     }
     if (!channel) return;
 
-    store.createTempChannel(
-      {
-        channelId: channel.id,
-        guildId: guild.id,
-        hubId: hub.id,
-        ownerId: member.id,
-        privacy: settings.privacy,
-        createdAt: Date.now(),
-      },
-      applied,
-    );
     const listsWereRejected = applied !== access;
-    if (listsWereRejected) {
-      // Keeping them would make every future channel go through the same failures.
-      store.changeProfileAccess(guild.id, member.id, 'allow', [], saved.allowed);
-      store.changeProfileAccess(guild.id, member.id, 'block', [], saved.blocked);
-    }
-
-    // Only pull them out of the hub: if they wandered off meanwhile, leave them where they are.
-    if (guild.voiceStates.cache.get(member.id)?.channelId !== hub.id) {
-      await this.remove(channel, 'Owner left before the channel was ready');
-      return;
-    }
+    this.settingUp.add(channel.id);
     try {
-      await member.voice.setChannel(channel, reason);
-    } catch (error) {
-      await this.remove(channel, 'Could not move the owner into the channel');
-      if (hasApiCode(error, RESTJSONErrorCodes.TargetUserIsNotConnectedToVoice)) return;
-      throw error;
+      store.createTempChannel(
+        {
+          channelId: channel.id,
+          guildId: guild.id,
+          hubId: hub.id,
+          ownerId: member.id,
+          privacy: settings.privacy,
+          createdAt: Date.now(),
+        },
+        applied,
+      );
+      if (listsWereRejected) {
+        // Keeping them would make every future channel go through the same failures.
+        store.changeProfileAccess(guild.id, member.id, 'allow', [], saved.allowed);
+        store.changeProfileAccess(guild.id, member.id, 'block', [], saved.blocked);
+      }
+
+      // Only pull them out of the hub: if they wandered off meanwhile, leave them where they are.
+      if (guild.voiceStates.cache.get(member.id)?.channelId !== hub.id) {
+        await this.remove(channel, 'Owner left before the channel was ready');
+        return;
+      }
+      try {
+        await member.voice.setChannel(channel, reason);
+      } catch (error) {
+        await this.remove(channel, 'Could not move the owner into the channel');
+        if (hasApiCode(error, RESTJSONErrorCodes.TargetUserIsNotConnectedToVoice)) return;
+        throw error;
+      }
+      await this.leftHub(member, hub);
+    } finally {
+      this.settingUp.delete(channel.id);
     }
 
     await panels
@@ -221,6 +235,21 @@ export class ChannelService {
         })
         .catch(() => undefined);
     }
+  }
+
+  /**
+   * Waits until the cache shows that a member we just moved is no longer in
+   * the hub. Until the gateway reports the move they still look like they are
+   * waiting there, and the next request for them would hand out a second channel.
+   */
+  private leftHub(member: GuildMember, hub: VoiceChannel): Promise<void> {
+    const guild = member.guild;
+    return this.deps.voice.until(
+      guild.id,
+      member.id,
+      () => guild.voiceStates.cache.get(member.id)?.channelId !== hub.id,
+      this.deps.tuning.voiceSettleMs,
+    );
   }
 
   private hubOf(guild: Guild, userId: string): VoiceChannel | null {
@@ -334,13 +363,12 @@ export class ChannelService {
 
   /** Someone left a channel: remove it if nobody is left. */
   handleLeave(guild: Guild, channelId: string): Promise<void> {
-    return this.removeIfEmpty(guild, channelId, 0);
+    return this.removeIfEmpty(guild, channelId);
   }
 
-  private removeIfEmpty(guild: Guild, channelId: string, minAgeMs: number): Promise<void> {
+  private removeIfEmpty(guild: Guild, channelId: string): Promise<void> {
     return this.deps.queue.run(`channel:${channelId}`, async () => {
-      const record = this.deps.store.getTempChannel(channelId);
-      if (!record || Date.now() - record.createdAt < minAgeMs) return;
+      if (!this.deps.store.getTempChannel(channelId) || this.settingUp.has(channelId)) return;
       const channel = guild.channels.cache.get(channelId);
       if (!isVoiceChannel(channel)) return;
       if (humanCount(guild, channelId) > 0) return;
@@ -385,7 +413,7 @@ export class ChannelService {
    * behind, records of channels that are gone, and mutes that need lifting.
    */
   async reconcileGuild(guild: Guild): Promise<void> {
-    const { store, log, sanctions, tuning } = this.deps;
+    const { store, log, sanctions } = this.deps;
 
     for (const hub of store.listHubs(guild.id)) {
       const channel = await this.resolve(guild, hub.channelId);
@@ -410,7 +438,7 @@ export class ChannelService {
         continue;
       }
       if (!channel) continue;
-      await this.removeIfEmpty(guild, record.channelId, tuning.emptyGraceMs).catch((error: unknown) =>
+      await this.removeIfEmpty(guild, record.channelId).catch((error: unknown) =>
         log.warn(`Could not remove the empty channel ${record.channelId} in guild ${guild.id}`, error),
       );
     }

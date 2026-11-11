@@ -133,6 +133,8 @@ export class FakeDiscord {
   /** Payloads the fake rejected as malformed, with the reason. */
   readonly rejected: string[] = [];
   commands: Json[] = [];
+  /** How many times a bot has connected to the gateway. */
+  gatewayConnections = 0;
 
   private readonly options: Required<Omit<FakeDiscordOptions, 'renameLimit'>> & Pick<FakeDiscordOptions, 'renameLimit'>;
   private readonly failures: { method: string; path: RegExp; status: number; body: Json }[] = [];
@@ -202,11 +204,14 @@ export class FakeDiscord {
 
     server.on('connection', (socket) => {
       this.socket = socket;
+      this.gatewayConnections++;
       socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45_000 } }));
       socket.on('message', (raw) => {
         const packet = JSON.parse(String(raw)) as { op: number };
         if (packet.op === 1) socket.send(JSON.stringify({ op: 11 }));
         if (packet.op === 2) this.identify();
+        // A client that lost its connection resumes its session; nothing was missed meanwhile.
+        if (packet.op === 6) this.dispatch('RESUMED', {});
       });
       socket.on('close', () => {
         if (this.socket === socket) this.socket = null;
@@ -355,6 +360,18 @@ export class FakeDiscord {
   }
 
   // ── failure injection ─────────────────────────────────────────────────
+
+  /** Discord closes the gateway connection with the given close code. */
+  closeGateway(code: number, reason = ''): void {
+    if (!this.socket) throw new Error('No bot is connected to the fake gateway');
+    this.socket.close(code, reason);
+  }
+
+  /** The gateway stops reacting altogether, as when the network between the bot and Discord is gone. */
+  freezeGateway(): void {
+    if (!this.socket) throw new Error('No bot is connected to the fake gateway');
+    this.socket.pause();
+  }
 
   /** Makes the next matching request fail the given way. */
   failNext(method: string, path: RegExp, status: number, body: Json): void {

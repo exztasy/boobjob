@@ -1,0 +1,19 @@
+# Only what the Dockerfile copies needs to reach the builder. Above all, the
+# token in .env and any local database must never end up in an image.
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+data
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+node_modules
+dist
+test
+README.md
+Dockerfile
+.dockerignore
+compose.yaml

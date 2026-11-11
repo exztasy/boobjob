@@ -6,12 +6,14 @@ import type { PanelService } from './services/panels.js';
 import type { RegionService } from './services/regions.js';
 import type { SanctionService } from './services/sanctions.js';
 import type { Store } from './storage/store.js';
+import type { VoiceStateWaiter } from './util/voiceWaiter.js';
 
 /** Everything an event or interaction handler may need. */
 export interface BotContext {
   client: Client;
   store: Store;
   log: Logger;
+  voice: VoiceStateWaiter;
   channels: ChannelService;
   panels: PanelService;
   sanctions: SanctionService;

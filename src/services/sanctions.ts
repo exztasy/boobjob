@@ -4,10 +4,12 @@ import type { Sanction, Store } from '../storage/store.js';
 import type { Tuning } from '../tuning.js';
 import { hasApiCode } from '../util/discord.js';
 import type { KeyedQueue } from '../util/keyedQueue.js';
+import type { VoiceStateWaiter } from '../util/voiceWaiter.js';
 
 export interface SanctionDeps {
   store: Store;
   queue: KeyedQueue;
+  voice: VoiceStateWaiter;
   log: Logger;
   tuning: Tuning;
 }
@@ -30,8 +32,6 @@ const REASON = 'Muted or deafened by the owner of a temporary voice channel';
  *   is never undone by accident.
  */
 export class SanctionService {
-  private readonly waiters = new Map<string, Set<() => void>>();
-
   constructor(private readonly deps: SanctionDeps) {}
 
   /** Changes whether a member is muted/deafened in a channel and applies it right away. */
@@ -65,8 +65,6 @@ export class SanctionService {
     const { store, log } = this.deps;
     const guild = newState.guild;
     const userId = newState.id;
-
-    for (const check of [...(this.waiters.get(waiterKey(guild.id, userId)) ?? [])]) check();
 
     if (oldState.channelId !== newState.channelId) {
       if (newState.channelId) {
@@ -122,42 +120,21 @@ export class SanctionService {
       }
       throw error;
     }
-    await this.settled(guild, userId, patch);
-  }
-
-  /**
-   * Waits until the cached voice state shows the change we just made. The
-   * cache only updates when the gateway reports it, and deciding the next
-   * change from a stale state would misjudge who muted whom.
-   */
-  private settled(guild: Guild, userId: string, patch: { mute?: boolean; deaf?: boolean }): Promise<void> {
-    const matches = (): boolean => {
-      const state = guild.voiceStates.cache.get(userId);
-      if (!state?.channelId) return true;
-      return (
-        (patch.mute === undefined || state.serverMute === patch.mute) &&
-        (patch.deaf === undefined || state.serverDeaf === patch.deaf)
-      );
-    };
-    if (matches()) return Promise.resolve();
-
-    return new Promise((resolve) => {
-      const key = waiterKey(guild.id, userId);
-      const checks = this.waiters.get(key) ?? new Set();
-      this.waiters.set(key, checks);
-
-      const finish = (): void => {
-        clearTimeout(timer);
-        checks.delete(check);
-        if (checks.size === 0) this.waiters.delete(key);
-        resolve();
-      };
-      const check = (): void => {
-        if (matches()) finish();
-      };
-      const timer = setTimeout(finish, this.deps.tuning.voiceSettleMs);
-      checks.add(check);
-    });
+    // Deciding the next change from a voice state that does not show this one yet would
+    // misjudge who muted whom, so wait for the gateway to report it.
+    await this.deps.voice.until(
+      guild.id,
+      userId,
+      () => {
+        const current = guild.voiceStates.cache.get(userId);
+        if (!current?.channelId) return true;
+        return (
+          (patch.mute === undefined || current.serverMute === patch.mute) &&
+          (patch.deaf === undefined || current.serverDeaf === patch.deaf)
+        );
+      },
+      this.deps.tuning.voiceSettleMs,
+    );
   }
 }
 
@@ -176,8 +153,4 @@ function plan(wanted: boolean, ours: boolean, active: boolean): { change: boolea
   }
   if (ours && active) return { change: false, ours: false };
   return { change: undefined, ours: false };
-}
-
-function waiterKey(guildId: string, userId: string): string {
-  return `${guildId}:${userId}`;
 }
