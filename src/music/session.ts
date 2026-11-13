@@ -66,6 +66,8 @@ export class MusicSession {
   panelMessageId: string | null = null;
   /** The bot may not post in the channel's chat, so there is no point in trying again. */
   panelBlocked = false;
+  /** Once the music is over: why, in the words the "now playing" message is left with. */
+  ending: string | null = null;
 
   idleTimer: NodeJS.Timeout | null = null;
   aloneTimer: NodeJS.Timeout | null = null;

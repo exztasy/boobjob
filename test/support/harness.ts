@@ -1,8 +1,10 @@
 import { PermissionFlagsBits } from 'discord.js';
 import { Bot } from '../../src/bot.js';
+import type { MusicConfig } from '../../src/config.js';
 import type { Logger } from '../../src/logger.js';
 import type { Tuning } from '../../src/tuning.js';
-import { FakeDiscord, type FakeDiscordOptions, type Json } from './fakeDiscord.js';
+import { FakeDiscord, MAIN_BOT_TOKEN, type FakeDiscordOptions, type Json } from './fakeDiscord.js';
+import { FakeLavalink } from './fakeLavalink.js';
 
 /** Timings short enough for tests to run in milliseconds. */
 export const FAST: Partial<Tuning> = {
@@ -12,6 +14,13 @@ export const FAST: Partial<Tuning> = {
   voiceSettleMs: 500,
   failureNoticeCooldownMs: 0,
   failureNoticeTtlMs: 60_000,
+  musicIdleMs: 60_000,
+  musicAloneMs: 60_000,
+  voiceJoinTimeoutMs: 1_000,
+  voiceRecoveryMs: 100,
+  lavalinkRetryMs: 50,
+  lavalinkRequestTimeoutMs: 2_000,
+  lavalinkPingMs: 60_000,
 };
 
 export interface LogEntry {
@@ -59,12 +68,36 @@ export interface World {
   alice: string;
   bob: string;
   carol: string;
+  /** The extra music bots, in the order of their tokens; empty without music. */
+  helpers: string[];
+  /** The music server; `null` when the world has no music. */
+  lavalink: FakeLavalink | null;
 }
 
-export type StandardIds = Pick<World, 'category' | 'hub' | 'lounge' | 'general' | 'alice' | 'bob' | 'carol'>;
+export type StandardIds = Pick<World, 'category' | 'hub' | 'lounge' | 'general' | 'alice' | 'bob' | 'carol' | 'helpers'>;
+
+export interface HelperSpec {
+  name?: string;
+  /** Set to false for a bot that was never invited to the server. */
+  inServer?: boolean;
+  roles?: string[];
+  /** A token the fake does not know, so that logging in fails. */
+  badToken?: boolean;
+}
+
+export interface MusicOptions {
+  /** How many extra music bots there are, or what each of them is like. */
+  helpers?: number | HelperSpec[];
+  /** The password the bot is configured with, if it should not be the right one. */
+  password?: string;
+  /** Set to false to start without waiting for every bot to reach the music server. */
+  waitForLavalink?: boolean;
+}
 
 export interface WorldOptions extends Partial<FakeDiscordOptions> {
   tuning?: Partial<Tuning>;
+  /** Turns music on: a fake Lavalink, plus extra music bots if asked for. */
+  music?: MusicOptions;
   databasePath?: string;
   /** Set to `false` to start without the standard hub being registered. */
   registerHub?: boolean;
@@ -74,8 +107,31 @@ export interface WorldOptions extends Partial<FakeDiscordOptions> {
 }
 
 export async function createWorld(options: WorldOptions = {}): Promise<World> {
-  const { tuning, databasePath, prepare, registerHub = true, onFatalDisconnect, ...fakeOptions } = options;
+  const { tuning, databasePath, prepare, registerHub = true, onFatalDisconnect, music: musicOptions, ...fakeOptions } = options;
   const fake = new FakeDiscord({ botPermissions: PermissionFlagsBits.Administrator, ...fakeOptions });
+
+  let lavalink: FakeLavalink | null = null;
+  let music: MusicConfig | null = null;
+  const helpers: string[] = [];
+  if (musicOptions) {
+    lavalink = new FakeLavalink();
+    await lavalink.start();
+    const specs: HelperSpec[] =
+      typeof musicOptions.helpers === 'number'
+        ? Array.from({ length: musicOptions.helpers }, () => ({}))
+        : (musicOptions.helpers ?? []);
+    const tokens = specs.map((spec, index) => {
+      const token = `helper-token-${index + 1}`;
+      helpers.push(
+        fake.addBot(spec.name ?? `musicbot${index + 1}`, { token, inServer: spec.inServer, roles: spec.roles }),
+      );
+      return spec.badToken ? `${token}-reset` : token;
+    });
+    music = {
+      lavalink: { ...lavalink.address, password: musicOptions.password ?? lavalink.password },
+      botTokens: tokens,
+    };
+  }
 
   const category = fake.addCategory('Voice channels');
   const hub = fake.addVoiceChannel('➕ Create a channel', { parent: category });
@@ -89,41 +145,60 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
     alice: fake.addUser('alice'),
     bob: fake.addUser('bob'),
     carol: fake.addUser('carol'),
+    helpers,
   };
   prepare?.(fake, ids);
 
   await fake.start();
-  const { bot, log } = await startBot(fake, { tuning, databasePath, onFatalDisconnect });
+  const { bot, log } = await startBot(fake, {
+    tuning,
+    databasePath,
+    onFatalDisconnect,
+    music,
+    waitForLavalink: musicOptions?.waitForLavalink,
+  });
   if (registerHub) bot.store.addHub(fake.guildId, hub);
-  return { fake, bot, log, ...ids };
+  return { fake, bot, log, lavalink, ...ids };
 }
 
 /** Starts a bot against the fake and waits until it has finished starting up. */
 export async function startBot(
   fake: FakeDiscord,
-  options: { tuning?: Partial<Tuning>; databasePath?: string; onFatalDisconnect?: (closeCode: number) => void } = {},
+  options: {
+    tuning?: Partial<Tuning>;
+    databasePath?: string;
+    onFatalDisconnect?: (closeCode: number) => void;
+    music?: MusicConfig | null;
+    waitForLavalink?: boolean;
+  } = {},
 ): Promise<{ bot: Bot; log: RecordingLogger }> {
   const log = new RecordingLogger();
   const registrationsBefore = fake.requestsTo('PUT', /\/commands$/u).length;
   const bot = new Bot({
-    token: 'fake-token',
+    token: MAIN_BOT_TOKEN,
     databasePath: options.databasePath ?? ':memory:',
     log,
     tuning: { ...FAST, ...options.tuning },
     clientOptions: { rest: { makeRequest: fake.makeRequest } },
     onFatalDisconnect: options.onFatalDisconnect,
+    music: options.music,
   });
   await bot.start();
   await until(
     () => bot.client.isReady() && fake.requestsTo('PUT', /\/commands$/u).length > registrationsBefore,
     'the bot to finish starting up',
   );
+  const music = bot.context.music;
+  if (music && options.waitForLavalink !== false) {
+    await until(() => music.bots.every((player) => player.usable), 'every music bot to reach the music server');
+  }
   return { bot, log };
 }
 
-export async function destroyWorld(world: Pick<World, 'fake' | 'bot'>): Promise<void> {
+export async function destroyWorld(world: Pick<World, 'fake' | 'bot'> & { lavalink?: FakeLavalink | null }): Promise<void> {
   await world.bot.stop();
   await world.fake.stop();
+  await world.lavalink?.stop();
 }
 
 /** Waits for something the bot does in the background. */

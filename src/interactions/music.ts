@@ -1,6 +1,7 @@
 import {
   InteractionContextType,
   MessageFlags,
+  RESTJSONErrorCodes,
   SlashCommandBuilder,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
@@ -13,7 +14,7 @@ import { LOOP_MODES, type LoopMode } from '../music/queue.js';
 import { MAX_VOLUME, mayManageBots, type MusicService } from '../music/service.js';
 import { parseMusicId } from '../ui/ids.js';
 import { renderEndedMusicPanel } from '../ui/musicPanel.js';
-import { describeError } from '../util/discord.js';
+import { describeError, hasApiCode } from '../util/discord.js';
 
 const NO_MENTIONS = { parse: [] } as const;
 
@@ -209,10 +210,11 @@ export async function handleMusicButton(context: BotContext, interaction: Button
     });
   }
 
-  // Show the outcome right away instead of waiting for the regular refresh. If the music
-  // has ended, the message already says why, and is left at that.
-  const panel = music.takePanel(interaction.channelId);
-  if (panel) await interaction.editReply({ ...panel, allowedMentions: NO_MENTIONS });
+  // Show the outcome right away instead of waiting for the regular refresh; if the music is
+  // over, this is the message saying why. A channel deleted meanwhile has no message left to show it in.
+  await interaction.editReply({ ...music.panelOf(session), allowedMentions: NO_MENTIONS }).catch((error: unknown) => {
+    if (!hasApiCode(error, RESTJSONErrorCodes.UnknownMessage, RESTJSONErrorCodes.UnknownChannel)) throw error;
+  });
 }
 
 function isLoopMode(value: string): value is LoopMode {

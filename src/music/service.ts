@@ -85,14 +85,15 @@ interface Loaded {
  * Plays music in voice channels.
  *
  * People only ever talk to the main bot. Behind it is a pool of bot accounts,
- * the main one included, each of which can sit in one voice channel per
- * server. Whoever asks for music gets a free bot from the pool sent to their
- * channel; if one is already playing there, the request joins its queue.
+ * each of which can sit in one voice channel per server: the helper bots, and
+ * the main bot itself as the last resort. Whoever asks for music gets a free
+ * bot from the pool sent to their channel; if one is already playing there,
+ * the request joins its queue.
  * Fetching and streaming the audio is Lavalink's job. This class decides
  * which bot goes where and what it plays next.
  */
 export class MusicService {
-  /** The pool, in the order bots are handed out: the main bot first. */
+  /** The main bot, then the helpers in the order of their tokens. */
   readonly bots: PlayerBot[];
   private readonly sessions = new Map<string, MusicSession>();
   /** Which session a bot is tied up in, per server. */
@@ -418,13 +419,12 @@ export class MusicService {
   }
 
   /**
-   * The "now playing" message of a channel as it should look at this moment,
-   * for a caller that is about to show exactly that; the update that was
-   * pending for it is dropped. `null` if no music is playing there.
+   * A session's "now playing" message as it should look at this moment, for
+   * a caller that is about to show exactly that; the update that was pending
+   * for it is dropped. Once the music is over, the message says why.
    */
-  takePanel(channelId: string): PanelMessage | null {
-    const session = this.sessions.get(channelId);
-    if (!session) return null;
+  panelOf(session: MusicSession): PanelMessage {
+    if (session.state === 'ended') return renderEndedMusicPanel(session.ending ?? 'The music has stopped.');
     if (session.panelTimer) clearTimeout(session.panelTimer);
     session.panelTimer = null;
     return renderMusicPanel(this.view(session));
@@ -487,13 +487,13 @@ export class MusicService {
   }
 
   /** Turns the message into a note on why the music ended, without controls. */
-  private closePanel(session: MusicSession, reason: string): Promise<void> {
+  private closePanel(session: MusicSession): Promise<void> {
     return this.deps.queue.run(panelKey(session), async () => {
       if (!session.panelMessageId) return;
       const channel = this.deps.client.channels.cache.get(session.channelId);
       if (!isVoiceChannel(channel)) return;
       await channel.messages
-        .edit(session.panelMessageId, { ...renderEndedMusicPanel(reason), allowedMentions: NO_MENTIONS })
+        .edit(session.panelMessageId, { ...this.panelOf(session), allowedMentions: NO_MENTIONS })
         .catch(() => undefined);
     });
   }
@@ -554,13 +554,16 @@ export class MusicService {
       throw new UserError("I can't reach the music server right now. Please try again in a moment.");
     }
 
-    const free = connected.filter((bot) => !this.busy.has(busyKey(bot, guildId)));
+    // Helpers first: the main bot is the one everybody talks to, and is kept free the longest.
+    const free = connected
+      .filter((bot) => !this.busy.has(busyKey(bot, guildId)))
+      .sort((a, b) => Number(a.isMain) - Number(b.isMain) || a.index - b.index);
     if (free.length === 0) {
-      const playing = members.flatMap((bot) => this.busy.get(busyKey(bot, guildId))?.channelId ?? []);
+      const playing = connected.map((bot) => channelMention(this.busy.get(busyKey(bot, guildId))!.channelId));
       throw new UserError(
-        members.length === 1
-          ? `I am already playing in ${channelMention(playing[0] ?? channel.id)}, and I can only be in one voice channel at a time. Join me there, or wait until I am done.`
-          : `All ${members.length} of my music bots are busy (in ${playing.map((id) => channelMention(id)).join(', ')}). Join one of those channels, or try again when one is free.`,
+        connected.length === 1
+          ? `Music is already playing in ${playing[0]}, and a bot can only be in one voice channel at a time. Join that channel, or try again when the music there is over.`
+          : `All my music bots are busy, in ${playing.join(', ')}. Join one of those channels, or try again when one is free.`,
       );
     }
 
@@ -688,24 +691,32 @@ export class MusicService {
   ): Promise<string> {
     const first = items[0]!;
     const idle = session.current === null;
-    const position = session.queue.length + 1;
     const added = session.queue.add(items);
     if (added === 0) {
       throw new UserError(`The queue is full: it holds ${MAX_QUEUE_LENGTH} tracks. Skip or remove some first.`);
     }
-    if (idle) await this.advance(session, 'finished');
+    if (idle) {
+      // Starting afresh: whatever went wrong before is no longer news.
+      session.problem = null;
+      await this.advance(session, 'finished');
+    }
     this.panel(session);
 
     const lines: string[] = [];
     if (joined) lines.push(`🎵 ${userMention(session.bot.userId ?? '0')} joined ${channelMention(session.channelId)}.`);
-    const startedIt = idle && session.current?.item === first;
-    if (playlist !== null) lines.push(`➕ Added ${countOf(added, 'track')} from **${playlist}** to the queue.`);
-    if (startedIt) lines.push(`▶️ Now playing ${trackLine(first.track)}`);
-    else if (playlist === null) lines.push(`➕ Added ${trackLine(first.track)} to the queue at position ${position}.`);
+    const started = idle ? session.current?.item : undefined;
+    if (playlist !== null) {
+      lines.push(`➕ Added ${countOf(added, 'track')} from **${playlist}** to the queue.`);
+    } else if (started !== first) {
+      const position = session.queue.upcoming.indexOf(first) + 1;
+      if (position > 0) lines.push(`➕ Added ${trackLine(first.track)} to the queue at position ${position}.`);
+    }
+    if (started) lines.push(`▶️ Now playing ${trackLine(started.track)}`);
     if (added < items.length) {
       lines.push(`${countOf(items.length - added, 'track')} did not fit: the queue holds ${MAX_QUEUE_LENGTH}.`);
     }
-    if (idle && !startedIt && session.problem) lines.push(`⚠️ ${session.problem}`);
+    // Starting it is the one place where a failure shows up before the reply is sent.
+    if (idle && session.problem) lines.push(`⚠️ ${session.problem}`);
     return lines.join('\n');
   }
 
@@ -943,12 +954,13 @@ export class MusicService {
     session.recoveryTimer = setTimeout(() => {
       session.recoveryTimer = null;
       this.run(session, async () => {
-        const player = await session.bot.node.getPlayer(session.guildId);
-        if (player.state?.connected) return;
+        // A player that cannot even be looked up is not going to play anything either.
+        const player = await session.bot.node.getPlayer(session.guildId).catch(() => null);
+        if (player?.state?.connected) return;
         log.warn(`The audio connection of ${session.bot.name} in guild ${session.guildId} did not come back (close code ${code})`);
         await this.finish(session, { kind: 'voice' });
       }).catch((error: unknown) => {
-        if (!(error instanceof SessionEndedError)) log.warn('Could not check on an audio connection', error);
+        if (!(error instanceof SessionEndedError)) log.error('Could not check on an audio connection', error);
       });
     }, tuning.voiceRecoveryMs);
     session.recoveryTimer.unref();
@@ -1023,6 +1035,7 @@ export class MusicService {
     const { bot, guildId, channelId } = session;
 
     session.state = 'ended';
+    session.ending = this.describeEnd(session, reason);
     if (this.sessions.get(channelId) === session) this.sessions.delete(channelId);
     if (this.busy.get(busyKey(bot, guildId)) === session) this.busy.delete(busyKey(bot, guildId));
     session.clearTimers();
@@ -1049,7 +1062,7 @@ export class MusicService {
         .setGuest(channel, bot.userId, false, `${bot.name} is done playing music`)
         .catch((error: unknown) => log.warn(`Could not take back the access of ${bot.name} to channel ${channelId}`, error));
     }
-    if (!gone) await this.closePanel(session, this.describeEnd(session, reason));
+    if (!gone) await this.closePanel(session);
     log.debug(`Music in channel ${channelId} of guild ${guildId} ended (${reason.kind})`);
   }
 
@@ -1059,7 +1072,7 @@ export class MusicService {
       case 'stopped':
         return `Stopped by ${userMention(reason.by)}.`;
       case 'idle':
-        return `${bot} left after ${formatDuration(this.deps.tuning.musicIdleMs)} with nothing to play.`;
+        return `${bot} left after ${describeSpan(this.deps.tuning.musicIdleMs)} with nothing to play.`;
       case 'alone':
         return `${bot} left because nobody was listening any more.`;
       case 'disconnected':
@@ -1097,6 +1110,12 @@ function isTrack(value: unknown): value is Track {
   if (typeof value !== 'object' || value === null) return false;
   const track = value as Partial<Track>;
   return typeof track.encoded === 'string' && typeof track.info === 'object' && track.info !== null;
+}
+
+/** "5 minutes", "30 seconds". */
+function describeSpan(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  return minutes >= 1 ? countOf(minutes, 'minute') : countOf(Math.max(1, Math.round(ms / 1000)), 'second');
 }
 
 function countOf(count: number, noun: string): string {

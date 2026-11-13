@@ -61,10 +61,18 @@ export class PlayerBot {
       },
     );
 
-    client.once(Events.ClientReady, (ready) => this.connectToLavalink(ready.user.id));
-    // Also fires for every guild while starting up, and again after an outage or a fresh
-    // gateway session, which is when the bot's place in voice can have changed unseen.
-    client.on(Events.GuildAvailable, (guild) => this.voice.reconcile(guild));
+    client.once(Events.ClientReady, (ready) => {
+      // Servers that arrived while the bot was starting up: Discord takes no voice requests
+      // before this point, so a channel left over from before a restart is left only now.
+      for (const guild of ready.guilds.cache.values()) {
+        if (guild.available) this.voice.reconcile(guild);
+      }
+      this.connectToLavalink(ready.user.id);
+    });
+    // A server that comes back after an outage: the bot's place in voice may have changed unseen.
+    client.on(Events.GuildAvailable, (guild) => {
+      if (client.isReady()) this.voice.reconcile(guild);
+    });
   }
 
   get isMain(): boolean {

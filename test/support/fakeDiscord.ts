@@ -7,6 +7,11 @@
  * thing it sends gateway events for every change, and it refuses requests
  * Discord would refuse: missing permissions, malformed messages and
  * components, voice changes for members who are not connected, and so on.
+ *
+ * Several bot accounts can be connected at once, each with its own token,
+ * gateway session and permissions, and bots can ask to join voice channels
+ * the way they do on Discord: with a voice state update over the gateway,
+ * answered by a voice state update and a voice server update.
  */
 import type { AddressInfo } from 'node:net';
 import { PermissionFlagsBits as P } from 'discord.js';
@@ -16,6 +21,10 @@ import { WebSocketServer, type WebSocket } from 'ws';
 export type Json = Record<string, any>;
 
 const API_PREFIX = '/api/v10';
+/** The token the main bot logs in with. */
+export const MAIN_BOT_TOKEN = 'fake-token';
+/** Where the fake sends bots for their audio connection. Nothing listens there. */
+export const VOICE_ENDPOINT = 'fake-voice.discord.test:443';
 const ALL_PERMISSIONS = (1n << 60n) - 1n;
 const EPHEMERAL = 1 << 6;
 const COMPONENTS_V2 = 1 << 15;
@@ -62,6 +71,8 @@ export const VOICE_REGIONS = [
 export interface RecordedRequest {
   method: string;
   path: string;
+  /** The bot whose token came with the request; `null` for requests without one, such as interaction responses. */
+  botId: string | null;
   body: Json | undefined;
   reason: string | undefined;
   status: number;
@@ -114,6 +125,30 @@ export interface OverwriteInit {
   deny?: bigint;
 }
 
+export interface VoiceRecord {
+  channel_id: string | null;
+  /** Server mute and deafen, set by moderators. */
+  mute: boolean;
+  deaf: boolean;
+  /** What the member did to themselves. */
+  self_mute: boolean;
+  self_deaf: boolean;
+}
+
+/** A voice state update a bot sent over the gateway (opcode 4). */
+export interface VoiceRequest {
+  botId: string;
+  channelId: string | null;
+  selfMute: boolean;
+  selfDeaf: boolean;
+}
+
+interface GatewaySession {
+  socket: WebSocket;
+  /** The bot that identified on this connection; `null` until it has. */
+  botId: string | null;
+}
+
 const DEFAULT_EVERYONE =
   P.ViewChannel | P.Connect | P.Speak | P.Stream | P.UseVAD | P.SendMessages | P.ReadMessageHistory | P.EmbedLinks;
 
@@ -125,7 +160,7 @@ export class FakeDiscord {
   readonly roles = new Map<string, Json>();
   readonly channels = new Map<string, Json>();
   readonly members = new Map<string, Json>();
-  readonly voice = new Map<string, { channel_id: string | null; mute: boolean; deaf: boolean }>();
+  readonly voice = new Map<string, VoiceRecord>();
   readonly messages = new Map<string, Json>();
   readonly requests: RecordedRequest[] = [];
   /** Requests the fake has no answer for. A test that ends with entries here is exercising something untested. */
@@ -135,6 +170,8 @@ export class FakeDiscord {
   commands: Json[] = [];
   /** How many times a bot has connected to the gateway. */
   gatewayConnections = 0;
+  /** Every voice state update the bots sent, in order. */
+  readonly voiceRequests: VoiceRequest[] = [];
 
   private readonly options: Required<Omit<FakeDiscordOptions, 'renameLimit'>> & Pick<FakeDiscordOptions, 'renameLimit'>;
   private readonly failures: { method: string; path: RegExp; status: number; body: Json }[] = [];
@@ -142,8 +179,16 @@ export class FakeDiscord {
   private readonly interactions = new Map<string, PendingInteraction>();
   private readonly renames = new Map<string, number[]>();
   private server: WebSocketServer | null = null;
-  private socket: WebSocket | null = null;
-  private sequence = 0;
+  private readonly sessions = new Set<GatewaySession>();
+  /** Bot id by token. */
+  private readonly tokens = new Map<string, string>();
+  /** The user of every bot account, whether or not it is in the server. */
+  private readonly botUsers = new Map<string, Json>();
+  /** Last sequence number sent to each bot, which carries over when it resumes. */
+  private readonly sequences = new Map<string, number>();
+  /** Bots whose voice requests go unanswered, as when Discord cannot place them. */
+  private readonly voiceIgnored = new Set<string>();
+  private voiceServers = 0;
   private lastId = 200000000000000000n;
 
   constructor(options: FakeDiscordOptions) {
@@ -155,7 +200,10 @@ export class FakeDiscord {
     this.roles.set(this.guildId, this.rolePayload(this.guildId, '@everyone', this.options.everyonePermissions, 0));
     this.roles.set(this.botRoleId, this.rolePayload(this.botRoleId, 'Voice Bot', this.options.botPermissions, 1));
     this.members.set(this.ownerId, this.memberPayload(this.userPayload(this.ownerId, 'server-owner'), []));
-    this.members.set(this.botId, this.memberPayload(this.userPayload(this.botId, 'voicebot', true), [this.botRoleId]));
+    const bot = this.userPayload(this.botId, 'voicebot', true);
+    this.botUsers.set(this.botId, bot);
+    this.tokens.set(MAIN_BOT_TOKEN, this.botId);
+    this.members.set(this.botId, this.memberPayload(bot, [this.botRoleId]));
   }
 
   // ── building the server ───────────────────────────────────────────────
@@ -169,6 +217,20 @@ export class FakeDiscord {
   addUser(username: string, options: { bot?: boolean; roles?: string[] } = {}): string {
     const id = this.nextId();
     this.members.set(id, this.memberPayload(this.userPayload(id, username, options.bot), options.roles ?? []));
+    return id;
+  }
+
+  /**
+   * Another bot account that can log in with `token`. It is a member of the
+   * server unless `inServer` is false, and has @everyone's permissions plus
+   * those of `roles`.
+   */
+  addBot(username: string, options: { token: string; inServer?: boolean; roles?: string[] }): string {
+    const id = this.nextId();
+    const user = this.userPayload(id, username, true);
+    this.botUsers.set(id, user);
+    this.tokens.set(options.token, id);
+    if (options.inServer !== false) this.members.set(id, this.memberPayload(user, options.roles ?? []));
     return id;
   }
 
@@ -191,7 +253,7 @@ export class FakeDiscord {
       ? options.overwrites.map(toOverwritePayload)
       : clone(parent?.permission_overwrites ?? []);
     this.channels.set(id, this.channelPayload(id, type, name, options.parent ?? null, overwrites, options));
-    if (this.socket) this.dispatch('CHANNEL_CREATE', this.channels.get(id)!);
+    this.dispatch('CHANNEL_CREATE', this.channels.get(id)!);
     return id;
   }
 
@@ -203,19 +265,19 @@ export class FakeDiscord {
     await new Promise<void>((resolve) => server.once('listening', resolve));
 
     server.on('connection', (socket) => {
-      this.socket = socket;
+      const session: GatewaySession = { socket, botId: null };
+      this.sessions.add(session);
       this.gatewayConnections++;
       socket.send(JSON.stringify({ op: 10, d: { heartbeat_interval: 45_000 } }));
       socket.on('message', (raw) => {
-        const packet = JSON.parse(String(raw)) as { op: number };
+        const packet = JSON.parse(String(raw)) as { op: number; d?: Json };
         if (packet.op === 1) socket.send(JSON.stringify({ op: 11 }));
-        if (packet.op === 2) this.identify();
+        if (packet.op === 2) this.identify(session, String(packet.d?.token ?? ''));
         // A client that lost its connection resumes its session; nothing was missed meanwhile.
-        if (packet.op === 6) this.dispatch('RESUMED', {});
+        if (packet.op === 6) this.resume(session, String(packet.d?.token ?? ''));
+        if (packet.op === 4) this.requestVoice(session, packet.d ?? {});
       });
-      socket.on('close', () => {
-        if (this.socket === socket) this.socket = null;
-      });
+      socket.on('close', () => this.sessions.delete(session));
     });
   }
 
@@ -233,22 +295,90 @@ export class FakeDiscord {
     return `ws://127.0.0.1:${address.port}`;
   }
 
-  private identify(): void {
-    this.sequence = 0;
-    this.dispatch('READY', {
+  private identify(session: GatewaySession, token: string): void {
+    const botId = this.tokens.get(token);
+    if (!botId) {
+      session.socket.close(4004, 'Authentication failed.');
+      return;
+    }
+    session.botId = botId;
+    this.sequences.set(botId, 0);
+    const inServer = this.members.has(botId);
+    this.send(session, 'READY', {
       v: 10,
-      user: this.members.get(this.botId)!.user,
-      guilds: [{ id: this.guildId, unavailable: true }],
-      session_id: 'fake-session',
+      user: this.botUsers.get(botId)!,
+      guilds: inServer ? [{ id: this.guildId, unavailable: true }] : [],
+      session_id: sessionIdOf(botId),
       resume_gateway_url: this.gatewayUrl,
       shard: [0, 1],
-      application: { id: this.botId, flags: 0 },
+      application: { id: botId, flags: 0 },
     });
-    this.dispatch('GUILD_CREATE', this.guildPayload());
+    if (inServer) this.send(session, 'GUILD_CREATE', this.guildPayload(botId));
   }
 
-  private dispatch(type: string, data: Json): void {
-    this.socket?.send(JSON.stringify({ op: 0, t: type, s: ++this.sequence, d: data }));
+  private resume(session: GatewaySession, token: string): void {
+    const botId = this.tokens.get(token);
+    if (!botId) {
+      session.socket.close(4004, 'Authentication failed.');
+      return;
+    }
+    session.botId = botId;
+    this.send(session, 'RESUMED', {});
+  }
+
+  private send(session: GatewaySession, type: string, data: Json): void {
+    const botId = session.botId!;
+    const sequence = (this.sequences.get(botId) ?? 0) + 1;
+    this.sequences.set(botId, sequence);
+    session.socket.send(JSON.stringify({ op: 0, t: type, s: sequence, d: data }));
+  }
+
+  /** Sends an event to every bot in the server, or to those `to` picks. */
+  private dispatch(type: string, data: Json, to?: (botId: string) => boolean): void {
+    for (const session of this.sessions) {
+      const botId = session.botId;
+      if (!botId || !this.members.has(botId) || (to && !to(botId))) continue;
+      if (session.socket.readyState !== session.socket.OPEN) continue;
+      this.send(session, type, data);
+    }
+  }
+
+  private sessionsOf(botId: string): GatewaySession[] {
+    return [...this.sessions].filter((session) => session.botId === botId);
+  }
+
+  /**
+   * A bot asks to join, move to or leave a voice channel. Discord answers
+   * with the bot's new voice state for everyone, and, when it joins, with a
+   * voice server for the bot alone. A request it cannot honour (no
+   * permission, a full channel) it does not answer at all.
+   */
+  private requestVoice(session: GatewaySession, request: Json): void {
+    const botId = session.botId;
+    if (!botId || request.guild_id !== this.guildId || !this.members.has(botId)) return;
+    const channelId = (request.channel_id as string | null | undefined) ?? null;
+    this.voiceRequests.push({ botId, channelId, selfMute: request.self_mute === true, selfDeaf: request.self_deaf === true });
+    if (this.voiceIgnored.has(botId)) return;
+
+    const state = this.voiceOf(botId);
+    if (channelId === null) {
+      if (state.channel_id !== null) this.changeVoice(botId, { channel_id: null, self_mute: false, self_deaf: false });
+      return;
+    }
+    const channel = this.channels.get(channelId);
+    if (channel?.type !== ChannelKind.Voice || !this.mayEnter(botId, channelId)) return;
+
+    this.changeVoice(botId, { channel_id: channelId, self_mute: request.self_mute === true, self_deaf: request.self_deaf === true });
+    const server = { token: `voice-token-${++this.voiceServers}`, guild_id: this.guildId, endpoint: VOICE_ENDPOINT };
+    this.dispatch('VOICE_SERVER_UPDATE', server, (recipient) => recipient === botId);
+  }
+
+  /** Whether someone could connect to a voice channel themselves: allowed in, and room for them. */
+  private mayEnter(userId: string, channelId: string): boolean {
+    if (!this.canJoin(userId, channelId)) return false;
+    const limit = Number(this.channels.get(channelId)?.user_limit ?? 0);
+    if (limit === 0 || this.can(userId, channelId, P.MoveMembers)) return true;
+    return this.membersIn(channelId).filter((id) => id !== userId).length < limit;
   }
 
   // ── what people do ────────────────────────────────────────────────────
@@ -260,9 +390,22 @@ export class FakeDiscord {
     this.changeVoice(userId, { channel_id: channelId });
   }
 
-  /** A member disconnects from voice. */
+  /** A member disconnects from voice, or a moderator disconnects them. */
   leave(userId: string): void {
     this.changeVoice(userId, { channel_id: null });
+  }
+
+  /** From now on Discord does not answer this bot's voice requests, as when it cannot place it anywhere. */
+  ignoreVoiceRequests(botId: string): void {
+    this.voiceIgnored.add(botId);
+  }
+
+  /** A member, possibly a bot, is kicked from the server. */
+  kick(userId: string): void {
+    if (this.voiceOf(userId).channel_id) this.leave(userId);
+    // The kicked bot learns that the server is gone for it; it no longer receives anything else.
+    for (const session of this.sessionsOf(userId)) this.send(session, 'GUILD_DELETE', { id: this.guildId });
+    this.members.delete(userId);
   }
 
   /** A moderator server-mutes or -deafens a member by hand. Like the API, this needs them to be connected. */
@@ -290,10 +433,10 @@ export class FakeDiscord {
     return this.voiceOf(userId).channel_id;
   }
 
-  voiceOf(userId: string): { channel_id: string | null; mute: boolean; deaf: boolean } {
+  voiceOf(userId: string): VoiceRecord {
     let state = this.voice.get(userId);
     if (!state) {
-      state = { channel_id: null, mute: false, deaf: false };
+      state = { channel_id: null, mute: false, deaf: false, self_mute: false, self_deaf: false };
       this.voice.set(userId, state);
     }
     return state;
@@ -303,7 +446,7 @@ export class FakeDiscord {
     return [...this.voice].filter(([, state]) => state.channel_id === channelId).map(([userId]) => userId);
   }
 
-  private changeVoice(userId: string, change: Partial<{ channel_id: string | null; mute: boolean; deaf: boolean }>): void {
+  private changeVoice(userId: string, change: Partial<VoiceRecord>): void {
     Object.assign(this.voiceOf(userId), change);
     this.dispatch('VOICE_STATE_UPDATE', this.voicePayload(userId));
   }
@@ -352,25 +495,36 @@ export class FakeDiscord {
     );
   }
 
-  /** The control panel in a channel: the latest components-only message. */
+  /** The control panel in a channel: the latest components-only message with the channel's controls. */
   panelIn(channelId: string): Json | undefined {
     return this.messagesIn(channelId)
-      .filter((message) => (message.flags & COMPONENTS_V2) !== 0)
+      .filter(
+        (message) =>
+          (message.flags & COMPONENTS_V2) !== 0 &&
+          allComponents(message).some((component) => String(component.custom_id ?? '').startsWith('vc:')),
+      )
       .at(-1);
   }
 
   // ── failure injection ─────────────────────────────────────────────────
 
-  /** Discord closes the gateway connection with the given close code. */
-  closeGateway(code: number, reason = ''): void {
-    if (!this.socket) throw new Error('No bot is connected to the fake gateway');
-    this.socket.close(code, reason);
+  /** Discord closes a bot's gateway connection with the given close code. */
+  closeGateway(code: number, reason = '', botId = this.botId): void {
+    const sessions = this.sessionsOf(botId);
+    if (sessions.length === 0) throw new Error(`Bot ${botId} is not connected to the fake gateway`);
+    for (const session of sessions) session.socket.close(code, reason);
   }
 
   /** The gateway stops reacting altogether, as when the network between the bot and Discord is gone. */
-  freezeGateway(): void {
-    if (!this.socket) throw new Error('No bot is connected to the fake gateway');
-    this.socket.pause();
+  freezeGateway(botId = this.botId): void {
+    const sessions = this.sessionsOf(botId);
+    if (sessions.length === 0) throw new Error(`Bot ${botId} is not connected to the fake gateway`);
+    for (const session of sessions) session.socket.pause();
+  }
+
+  /** Whether a bot has a gateway connection open. */
+  isConnected(botId: string): boolean {
+    return this.sessionsOf(botId).some((session) => session.socket.readyState === session.socket.OPEN);
   }
 
   /** Makes the next matching request fail the given way. */
@@ -540,7 +694,9 @@ export class FakeDiscord {
     };
     this.interactions.set(token, pending);
 
-    this.dispatch('INTERACTION_CREATE', {
+    this.dispatch(
+      'INTERACTION_CREATE',
+      {
       id,
       application_id: this.botId,
       type,
@@ -560,7 +716,10 @@ export class FakeDiscord {
       attachment_size_limit: 10_485_760,
       data,
       ...(message ? { message } : {}),
-    });
+      },
+      // Commands belong to the main bot's application, and only it hears about their use.
+      (botId) => botId === this.botId,
+    );
 
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -597,6 +756,8 @@ export class FakeDiscord {
     const method = (init.method ?? 'GET').toUpperCase();
     const body = typeof init.body === 'string' ? (JSON.parse(init.body) as Json) : undefined;
     const reason = readHeader(init.headers, 'x-audit-log-reason');
+    const authorization = readHeader(init.headers, 'authorization');
+    const caller = authorization?.startsWith('Bot ') ? (this.tokens.get(authorization.slice(4)) ?? null) : null;
 
     const slow = this.delays.findIndex((delay) => delay.method === method && delay.path.test(path));
     if (slow >= 0) {
@@ -611,7 +772,10 @@ export class FakeDiscord {
       response = { status: failure!.status, body: failure!.body };
     } else {
       try {
-        response = this.route(method, path, body);
+        // Interaction responses travel without a token: the interaction's own token is the key.
+        const tokenless = path.startsWith('/interactions/') || path.startsWith('/webhooks/');
+        if (!caller && !(tokenless && authorization === undefined)) throw new ApiError(401, 0, '401: Unauthorized');
+        response = this.route(method, path, body, caller!);
       } catch (error) {
         if (!(error instanceof ApiError)) throw error;
         if (error.code === ErrorCode.InvalidFormBody) this.rejected.push(`${method} ${path}: ${error.message}`);
@@ -619,7 +783,14 @@ export class FakeDiscord {
       }
     }
 
-    this.requests.push({ method, path, body, reason: reason ? decodeURIComponent(reason) : undefined, status: response.status });
+    this.requests.push({
+      method,
+      path,
+      botId: caller,
+      body,
+      reason: reason ? decodeURIComponent(reason) : undefined,
+      status: response.status,
+    });
     if (response.status === 204) return new Response(null, { status: 204 });
     return new Response(JSON.stringify(response.body ?? {}), {
       status: response.status,
@@ -627,7 +798,8 @@ export class FakeDiscord {
     });
   };
 
-  private route(method: string, path: string, body: Json | undefined): Reply {
+  /** Answers a request from the bot `caller`; `null` only for interaction responses. */
+  private route(method: string, path: string, body: Json | undefined, caller: string): Reply {
     let match: RegExpMatchArray | null;
 
     if (method === 'GET' && path === '/gateway/bot') {
@@ -638,21 +810,22 @@ export class FakeDiscord {
       });
     }
     if (method === 'PUT' && /^\/applications\/\d+\/commands$/u.test(path)) {
+      if (caller !== this.botId) invalid('commands: only the main bot registers commands in these tests');
       for (const command of body as unknown as Json[]) validateCommand(command);
       this.commands = (body as unknown as Json[]).map((command) => ({ ...command, id: this.nextId(), application_id: this.botId }));
       return ok(this.commands);
     }
     if (method === 'GET' && path === '/voice/regions') return ok(VOICE_REGIONS);
 
-    if (method === 'POST' && /^\/guilds\/\d+\/channels$/u.test(path)) return ok(this.createChannel(body ?? {}), 201);
+    if (method === 'POST' && /^\/guilds\/\d+\/channels$/u.test(path)) return ok(this.createChannel(body ?? {}, caller), 201);
 
     if ((match = path.match(/^\/channels\/(\d+)$/u))) {
       const channel = this.channels.get(match[1]!);
       if (!channel) throw new ApiError(404, ErrorCode.UnknownChannel, 'Unknown Channel');
       if (method === 'GET') return ok(channel);
-      if (method === 'PATCH') return ok(this.modifyChannel(channel, body ?? {}));
+      if (method === 'PATCH') return ok(this.modifyChannel(channel, body ?? {}, caller));
       if (method === 'DELETE') {
-        this.requireManageable(channel);
+        this.requireManageable(channel, caller);
         this.removeChannel(channel);
         return ok(channel);
       }
@@ -662,21 +835,24 @@ export class FakeDiscord {
       const member = this.members.get(match[1]!);
       if (!member) throw new ApiError(404, ErrorCode.UnknownMember, 'Unknown Member');
       if (method === 'GET') return ok(member);
-      if (method === 'PATCH') return ok(this.modifyMember(match[1]!, body ?? {}));
+      if (method === 'PATCH') return ok(this.modifyMember(match[1]!, body ?? {}, caller));
     }
 
     if (method === 'POST' && (match = path.match(/^\/channels\/(\d+)\/messages$/u))) {
       const channel = this.channels.get(match[1]!);
       if (!channel) throw new ApiError(404, ErrorCode.UnknownChannel, 'Unknown Channel');
-      this.requireChat(channel);
-      return ok(this.storeMessage(channel.id, body ?? {}));
+      this.requireChat(channel, caller);
+      return ok(this.storeMessage(channel.id, body ?? {}, 0, caller));
     }
 
     if ((match = path.match(/^\/channels\/(\d+)\/messages\/(\d+)$/u))) {
       const message = this.messages.get(match[2]!);
       if (!this.channels.has(match[1]!)) throw new ApiError(404, ErrorCode.UnknownChannel, 'Unknown Channel');
       if (!message || message.channel_id !== match[1]) throw new ApiError(404, ErrorCode.UnknownMessage, 'Unknown Message');
-      if (method === 'PATCH') return ok(this.reviseMessage(message, body ?? {}));
+      if (method === 'PATCH') {
+        if (message.author.id !== caller) throw new ApiError(403, 50005, 'Cannot edit a message authored by another user');
+        return ok(this.reviseMessage(message, body ?? {}));
+      }
       if (method === 'DELETE') {
         this.messages.delete(message.id);
         return { status: 204 };
@@ -704,8 +880,8 @@ export class FakeDiscord {
 
   // channels
 
-  private createChannel(body: Json): Json {
-    const bot = this.guildPermissions(this.botId);
+  private createChannel(body: Json, caller: string): Json {
+    const bot = this.guildPermissions(caller);
     if ((bot & P.ManageChannels) === 0n) throw new ApiError(403, ErrorCode.MissingPermissions, 'Missing Permissions');
 
     const type = body.type ?? ChannelKind.Text;
@@ -747,13 +923,13 @@ export class FakeDiscord {
     return channel;
   }
 
-  private modifyChannel(channel: Json, body: Json): Json {
-    this.requireManageable(channel);
+  private modifyChannel(channel: Json, body: Json, caller: string): Json {
+    this.requireManageable(channel, caller);
     this.validateChannelFields(body, channel.type);
-    const bot = this.guildPermissions(this.botId);
+    const bot = this.guildPermissions(caller);
 
     if (body.permission_overwrites !== undefined) {
-      if (!this.can(this.botId, channel.id, P.ManageRoles)) {
+      if (!this.can(caller, channel.id, P.ManageRoles)) {
         throw new ApiError(403, ErrorCode.MissingPermissions, 'Missing Permissions');
       }
       const next = normalizeOverwrites(body.permission_overwrites);
@@ -831,35 +1007,35 @@ export class FakeDiscord {
   }
 
   /** Managing a voice channel takes being able to see and connect to it, plus Manage Channels. */
-  private requireManageable(channel: Json): void {
-    this.requireAccess(channel);
-    if (!this.can(this.botId, channel.id, P.ManageChannels)) {
+  private requireManageable(channel: Json, caller: string): void {
+    this.requireAccess(channel, caller);
+    if (!this.can(caller, channel.id, P.ManageChannels)) {
       throw new ApiError(403, ErrorCode.MissingPermissions, 'Missing Permissions');
     }
   }
 
-  private requireAccess(channel: Json): void {
+  private requireAccess(channel: Json, caller: string): void {
     const needed = channel.type === ChannelKind.Voice ? P.ViewChannel | P.Connect : P.ViewChannel;
-    if (!this.can(this.botId, channel.id, needed)) throw new ApiError(403, ErrorCode.MissingAccess, 'Missing Access');
+    if (!this.can(caller, channel.id, needed)) throw new ApiError(403, ErrorCode.MissingAccess, 'Missing Access');
   }
 
-  private requireChat(channel: Json): void {
-    this.requireAccess(channel);
-    if (!this.can(this.botId, channel.id, P.SendMessages)) {
+  private requireChat(channel: Json, caller: string): void {
+    this.requireAccess(channel, caller);
+    if (!this.can(caller, channel.id, P.SendMessages)) {
       throw new ApiError(403, ErrorCode.MissingPermissions, 'Missing Permissions');
     }
   }
 
   // members
 
-  private modifyMember(userId: string, body: Json): Json {
+  private modifyMember(userId: string, body: Json, caller: string): Json {
     const state = this.voiceOf(userId);
     const touchesVoice = 'channel_id' in body || 'mute' in body || 'deaf' in body;
     if (touchesVoice) {
       if (!state.channel_id) throw new ApiError(400, ErrorCode.NotConnectedToVoice, 'Target user is not connected to voice.');
       const here = state.channel_id;
       const need = (permission: bigint): void => {
-        if (!this.can(this.botId, here, permission)) throw new ApiError(403, ErrorCode.MissingPermissions, 'Missing Permissions');
+        if (!this.can(caller, here, permission)) throw new ApiError(403, ErrorCode.MissingPermissions, 'Missing Permissions');
       };
       if ('mute' in body) need(P.MuteMembers);
       if ('deaf' in body) need(P.DeafenMembers);
@@ -869,10 +1045,10 @@ export class FakeDiscord {
           const destination = this.channels.get(body.channel_id);
           if (!destination) throw new ApiError(400, ErrorCode.UnknownChannel, 'Unknown Channel');
           // "The current user must have permissions to both connect to the channel and have the MOVE_MEMBERS permission."
-          if (!this.canJoin(this.botId, destination.id)) throw new ApiError(403, ErrorCode.MissingPermissions, 'Missing Permissions');
+          if (!this.canJoin(caller, destination.id)) throw new ApiError(403, ErrorCode.MissingPermissions, 'Missing Permissions');
         }
       }
-      const change: Partial<{ channel_id: string | null; mute: boolean; deaf: boolean }> = {};
+      const change: Partial<VoiceRecord> = {};
       if ('channel_id' in body) change.channel_id = body.channel_id;
       if ('mute' in body) change.mute = body.mute;
       if ('deaf' in body) change.deaf = body.deaf;
@@ -883,13 +1059,13 @@ export class FakeDiscord {
 
   // messages
 
-  private storeMessage(channelId: string, body: Json, extraFlags = 0): Json {
+  private storeMessage(channelId: string, body: Json, extraFlags = 0, author = this.botId): Json {
     validateMessage(body, true);
     const id = this.nextId();
     const message: Json = {
       id,
       channel_id: channelId,
-      author: this.members.get(this.botId)!.user,
+      author: this.botUsers.get(author)!,
       content: body.content ?? '',
       timestamp: new Date().toISOString(),
       edited_timestamp: null,
@@ -979,7 +1155,7 @@ export class FakeDiscord {
 
   // ── payloads ──────────────────────────────────────────────────────────
 
-  private guildPayload(): Json {
+  private guildPayload(forBotId: string): Json {
     const connected = [...this.voice].filter(([, state]) => state.channel_id !== null).map(([userId]) => userId);
     return {
       id: this.guildId,
@@ -1008,7 +1184,7 @@ export class FakeDiscord {
       unavailable: false,
       member_count: this.members.size,
       // Without the members intent Discord only sends the bot itself and whoever is in voice.
-      members: [this.members.get(this.botId)!, ...connected.map((userId) => this.members.get(userId)!)],
+      members: [...new Set([forBotId, ...connected])].map((userId) => this.members.get(userId)!),
       voice_states: connected.map((userId) => {
         const { guild_id: _guildId, ...state } = this.voicePayload(userId);
         return state;
@@ -1038,11 +1214,12 @@ export class FakeDiscord {
       channel_id: state.channel_id,
       user_id: userId,
       member: { ...this.requireMember(userId), mute: state.mute, deaf: state.deaf },
-      session_id: `session-${userId}`,
+      // A bot's voice session is its gateway session.
+      session_id: sessionIdOf(userId),
       deaf: state.deaf,
       mute: state.mute,
-      self_deaf: false,
-      self_mute: false,
+      self_deaf: state.self_deaf,
+      self_mute: state.self_mute,
       self_video: false,
       suppress: false,
       request_to_speak_timestamp: null,
@@ -1473,6 +1650,10 @@ function readHeader(headers: unknown, name: string): string | undefined {
 
 function describe(data: Json): string {
   return data.custom_id ?? `/${data.name} ${data.options?.[0]?.name ?? ''}`.trim();
+}
+
+function sessionIdOf(userId: string): string {
+  return `session-${userId}`;
 }
 
 function clone<T>(value: T): T {
