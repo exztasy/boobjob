@@ -406,3 +406,31 @@ test('music plays where the bot may not post its message', async (t) => {
   assert.match(await music(world, alice, 'skip'), /last track/u);
   assertClean(world);
 });
+
+test('news about a track the bot has already moved on from changes nothing', async (t) => {
+  const world = await musicWorld(t);
+  const { fake, lavalink, alice, helpers } = world;
+  const helper = helpers[0]!;
+  for (const title of ['One', 'Two', 'Three']) lavalink!.addTrack({ title });
+  const { channelId } = await createChannelFor(world, alice);
+  for (const title of ['One', 'Two', 'Three']) await music(world, alice, 'play', { query: title });
+  const first = lavalink!.playerOf(helper, fake.guildId)!.track!;
+
+  // "One" ends by itself just as someone skips it: the skip is handled first, the news comes after.
+  await music(world, alice, 'skip');
+  await startsPlaying(world, helper, 'Two');
+  lavalink!.sendEvent(helper, { type: 'TrackEndEvent', guildId: fake.guildId, track: first, reason: 'finished' });
+  lavalink!.sendEvent(helper, {
+    type: 'TrackExceptionEvent',
+    guildId: fake.guildId,
+    track: first,
+    exception: { message: 'Late.', severity: 'common', cause: '' },
+  });
+  await settle(100);
+
+  assert.equal(playing(world, helper), 'Two', 'the track that took its place keeps playing');
+  assert.match(await music(world, alice, 'queue'), /Up next\*\* · 1 track/u);
+  await panelShows(fake, channelId, /Now playing\*\*\n\*\*\[Two\]/u);
+  assert.doesNotMatch(textOf(musicPanelIn(fake, channelId)!), /Late/u);
+  assertClean(world);
+});

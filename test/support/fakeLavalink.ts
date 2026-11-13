@@ -240,6 +240,17 @@ export class FakeLavalink {
     this.emit(session, { type: 'WebSocketClosedEvent', guildId, code, reason, byRemote: true });
   }
 
+  /**
+   * Sends an event as it is, such as one about a track that is no longer
+   * playing: events cross the bot's requests on the wire, so one can arrive
+   * after the bot has already moved on.
+   */
+  sendEvent(userId: string, event: Json): void {
+    const session = this.sessionOf(userId);
+    if (!session) throw new Error(`Bot ${userId} is not connected`);
+    this.emit(session, event);
+  }
+
   /** The audio connection of a bot's player comes back by itself. */
   restoreVoice(userId: string, guildId: string): void {
     const player = this.sessionOf(userId)?.players.get(guildId);
@@ -429,9 +440,7 @@ export class FakeLavalink {
         throw new HttpProblem(400, 'Bad Request', 'token, endpoint, sessionId and channelId must be provided in voice state');
       }
     }
-    if (update.volume !== undefined && (!Number.isInteger(update.volume) || update.volume < 0 || update.volume > 1000)) {
-      throw new HttpProblem(400, 'Bad Request', 'Volume must be between 0 and 1000');
-    }
+    if (update.volume !== undefined && !Number.isInteger(update.volume)) throw new HttpProblem(400, 'Bad Request', 'Bad Request');
     let next: Track | null | undefined;
     if (track && 'encoded' in track) {
       if (track.encoded === null) next = null;
@@ -451,7 +460,8 @@ export class FakeLavalink {
       player.voice = { token: voice.token, endpoint: voice.endpoint, sessionId: voice.sessionId, channelId: voice.channelId };
       player.connected = true;
     }
-    if (update.volume !== undefined) player.volume = update.volume;
+    // Like Lavalink, which clamps rather than refuses.
+    if (update.volume !== undefined) player.volume = Math.min(Math.max(update.volume, 0), 1000);
     if (next === undefined) {
       if (typeof update.paused === 'boolean') player.paused = update.paused;
       if (typeof update.position === 'number' && player.track) player.position = update.position;
