@@ -46,6 +46,26 @@ export const FieldId = {
 /** Value standing for "let Discord pick" in the region menu. */
 export const AUTOMATIC_REGION = 'auto';
 
+/**
+ * Buttons under the "now playing" message. Like the channel controls they
+ * live in the chat of the voice channel they act on.
+ */
+const MUSIC_PREFIX = 'music';
+
+export const MusicButton = {
+  Toggle: `${MUSIC_PREFIX}:toggle`,
+  Skip: `${MUSIC_PREFIX}:skip`,
+  Stop: `${MUSIC_PREFIX}:stop`,
+  Loop: `${MUSIC_PREFIX}:loop`,
+  Shuffle: `${MUSIC_PREFIX}:shuffle`,
+} as const;
+
+/** The action of a music button (`toggle`, `skip`, ...); `null` for ids that are not music buttons. */
+export function parseMusicId(customId: string): string | null {
+  const [prefix, action] = customId.split(':');
+  return prefix === MUSIC_PREFIX && action ? action : null;
+}
+
 export interface ParsedId {
   /** What the control is about, e.g. `name` or `privacy`. */
   action: string;

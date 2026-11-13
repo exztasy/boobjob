@@ -1,5 +1,6 @@
 import type { Client } from 'discord.js';
 import type { Logger } from './logger.js';
+import type { MusicService } from './music/service.js';
 import type { ActionService } from './services/actions.js';
 import type { ChannelService } from './services/channels.js';
 import type { PanelService } from './services/panels.js';
@@ -19,4 +20,6 @@ export interface BotContext {
   sanctions: SanctionService;
   actions: ActionService;
   regions: RegionService;
+  /** `null` when the bot runs without the music feature. */
+  music: MusicService | null;
 }

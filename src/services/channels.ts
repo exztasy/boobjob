@@ -21,6 +21,7 @@ import type { Tuning } from '../tuning.js';
 import { describeError, hasApiCode, humanCount, isVoiceChannel, sleep, voiceStatesIn } from '../util/discord.js';
 import type { KeyedQueue } from '../util/keyedQueue.js';
 import type { VoiceStateWaiter } from '../util/voiceWaiter.js';
+import type { GuestList } from './guests.js';
 import type { PanelService } from './panels.js';
 import type { RenameService } from './renames.js';
 import type { SanctionService } from './sanctions.js';
@@ -33,6 +34,7 @@ export interface ChannelDeps {
   panels: PanelService;
   sanctions: SanctionService;
   renames: RenameService;
+  guests: GuestList;
   log: Logger;
   tuning: Tuning;
 }
@@ -40,6 +42,7 @@ export interface ChannelDeps {
 interface OverwriteSubject extends AccessLists {
   ownerId: string;
   privacy: Privacy;
+  guests?: readonly string[];
 }
 
 const NO_ACCESS: AccessLists = Object.freeze({ allowed: [], blocked: [] });
@@ -300,9 +303,30 @@ export class ChannelService {
     const overwrites = this.overwritesFor(channel.guild, me, channel.parent, {
       ownerId: record.ownerId,
       privacy: record.privacy,
+      guests: this.deps.guests.of(channel.id),
       ...store.getChannelAccess(channel.id),
     });
     await channel.permissionOverwrites.set(overwrites, reason);
+  }
+
+  /**
+   * Lets one of our own bots into a personal channel for as long as it works
+   * there, or takes that back. Does nothing for channels that are not ours.
+   */
+  setGuest(channel: VoiceChannel, userId: string, present: boolean, reason: string): Promise<void> {
+    return this.deps.queue.run(`channel:${channel.id}`, async () => {
+      const { guests, store } = this.deps;
+      if (!store.getTempChannel(channel.id)) return;
+      const changed = present ? guests.add(channel.id, userId) : guests.remove(channel.id, userId);
+      if (!changed) return;
+      try {
+        await this.applyOverwrites(channel, reason);
+      } catch (error) {
+        // Not let in after all. (A guest that could not be shown out loses its access with the next change.)
+        if (present) guests.remove(channel.id, userId);
+        throw error;
+      }
+    });
   }
 
   private overwritesFor(
@@ -392,10 +416,11 @@ export class ChannelService {
 
   /** Drops all state for a channel that is gone. */
   private forget(channelId: string): void {
-    const { store, panels, renames } = this.deps;
+    const { store, panels, renames, guests } = this.deps;
     store.deleteTempChannel(channelId);
     panels.forget(channelId);
     renames.forget(channelId);
+    guests.forget(channelId);
     this.deleting.delete(channelId);
   }
 

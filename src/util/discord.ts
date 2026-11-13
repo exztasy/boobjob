@@ -16,6 +16,11 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Whether logging in failed because Discord does not accept the token. */
+export function isInvalidToken(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'TokenInvalid';
+}
+
 /** Whether an error is Discord rejecting a request with one of the given error codes. */
 export function hasApiCode(error: unknown, ...codes: RESTJSONErrorCodes[]): boolean {
   return error instanceof DiscordAPIError && codes.includes(Number(error.code));

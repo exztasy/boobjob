@@ -3,6 +3,7 @@ import { Bot } from './bot.js';
 import { ConfigError, loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { DatabaseError } from './storage/database.js';
+import { isInvalidToken } from './util/discord.js';
 
 async function main(): Promise<void> {
   let config;
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
       token: config.token,
       databasePath: config.databasePath,
       log,
+      music: config.music,
       // Discord will not let this connection be re-established, so all that is left is to
       // stop. Exiting with an error lets whatever supervises the process notice and react,
       // instead of the bot sitting there connected to nothing.
@@ -72,10 +74,6 @@ async function main(): Promise<void> {
     await bot.stop().catch(() => undefined);
     process.exitCode = 1;
   }
-}
-
-function isInvalidToken(error: unknown): boolean {
-  return error instanceof Error && 'code' in error && error.code === 'TokenInvalid';
 }
 
 function describeFatalClose(closeCode: number): string {

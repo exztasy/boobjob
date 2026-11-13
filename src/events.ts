@@ -1,13 +1,14 @@
 import { Events, OAuth2Scopes, type Guild, type VoiceState } from 'discord.js';
 import type { BotContext } from './context.js';
 import { commandDefinitions } from './interactions/commands.js';
+import { musicCommand } from './interactions/music.js';
 import { handleInteraction } from './interactions/router.js';
 import { INVITE_PERMISSIONS } from './permissions.js';
 import { isVoiceChannel } from './util/discord.js';
 
 /** Connects Discord's events to the services. */
 export function registerEvents(context: BotContext): void {
-  const { client, store, log, voice, channels, panels, sanctions } = context;
+  const { client, store, log, voice, channels, panels, sanctions, music } = context;
 
   const reconcile = (guild: Guild): void => {
     channels
@@ -23,10 +24,12 @@ export function registerEvents(context: BotContext): void {
     });
     log.info(`Invite link: ${invite}`);
 
-    ready.application.commands.set(commandDefinitions).then(
+    // Without a music server there is no `/music`; registering the list anew takes a stale one away.
+    ready.application.commands.set(music ? [...commandDefinitions, musicCommand()] : commandDefinitions).then(
       () => log.info('Slash commands are registered'),
       (error: unknown) => log.error('Could not register the slash commands', error),
     );
+    if (!music) log.info('Music is off: no Lavalink server is configured (LAVALINK_PASSWORD is not set)');
     // Catch up on whatever happened while the bot was offline.
     void channels.sweep();
   });
@@ -56,9 +59,13 @@ export function registerEvents(context: BotContext): void {
     }
 
     sanctions.handleVoiceStateUpdate(oldState, newState);
+    music?.handleVoiceStateUpdate(oldState, newState);
   });
 
-  client.on(Events.ChannelDelete, (channel) => channels.handleChannelDelete(channel));
+  client.on(Events.ChannelDelete, (channel) => {
+    channels.handleChannelDelete(channel);
+    music?.handleChannelDelete(channel);
+  });
 
   // Someone with the permission to do so can edit a personal channel by hand; show that in the panel.
   client.on(Events.ChannelUpdate, (before, after) => {
@@ -78,6 +85,9 @@ export function registerEvents(context: BotContext): void {
   // reconciling is idempotent, so doing it twice is harmless and neither path is relied on alone.
   client.on(Events.GuildCreate, reconcile);
   client.on(Events.GuildAvailable, reconcile);
+  // Out of a server, or cut off from it: nobody there can reach the bot to control anything.
+  client.on(Events.GuildDelete, (guild) => music?.handleGuildGone(guild));
+  client.on(Events.GuildUnavailable, (guild) => music?.handleGuildGone(guild));
 
   client.on(Events.InteractionCreate, (interaction) => void handleInteraction(context, interaction));
 

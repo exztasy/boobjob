@@ -47,10 +47,17 @@ export class PanelService {
       const record = store.getTempChannel(channel.id);
       if (!record) return;
 
-      const message = await channel.send({
-        ...renderPanel(this.view(channel, record)),
-        allowedMentions: { parse: [], users: options.mentionOwner ? [record.ownerId] : [] },
-      });
+      let message;
+      try {
+        message = await channel.send({
+          ...renderPanel(this.view(channel, record)),
+          allowedMentions: { parse: [], users: options.mentionOwner ? [record.ownerId] : [] },
+        });
+      } catch (error) {
+        // Removed in the meantime, typically because the owner left again right away.
+        if (hasApiCode(error, RESTJSONErrorCodes.UnknownChannel)) return;
+        throw error;
+      }
       store.setPanelMessage(channel.id, message.id);
 
       if (record.panelMessageId) {

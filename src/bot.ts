@@ -1,10 +1,13 @@
 import { Client, Events, GatewayIntentBits, type ClientOptions, type RateLimitData } from 'discord.js';
+import type { MusicConfig } from './config.js';
 import type { BotContext } from './context.js';
 import { RenameLimiter } from './domain/renameLimiter.js';
 import { registerEvents } from './events.js';
 import type { Logger } from './logger.js';
+import { MusicService } from './music/service.js';
 import { ActionService } from './services/actions.js';
 import { ChannelService } from './services/channels.js';
+import { GuestList } from './services/guests.js';
 import { PanelService } from './services/panels.js';
 import { RegionService } from './services/regions.js';
 import { RenameService } from './services/renames.js';
@@ -19,8 +22,10 @@ export interface BotOptions {
   token: string;
   databasePath: string;
   log: Logger;
+  /** Where to get music from, and which extra bots play it. Leave out to run without music. */
+  music?: MusicConfig | null;
   tuning?: Partial<Tuning>;
-  /** Overrides for the Discord client; tests use this to point it at a fake Discord. */
+  /** Overrides for the Discord clients; tests use this to point them at a fake Discord. */
   clientOptions?: Partial<ClientOptions>;
   /**
    * Called when Discord closes the connection in a way it will not let us
@@ -74,11 +79,25 @@ export class Bot {
     const panels = new PanelService({ client, store, renames, queue, log, tuning });
     renames.onApplied = (channelId) => panels.schedule(channelId);
     const sanctions = new SanctionService({ store, queue, voice, log, tuning });
-    const channels = new ChannelService({ client, store, queue, voice, panels, sanctions, renames, log, tuning });
+    const guests = new GuestList();
+    const channels = new ChannelService({ client, store, queue, voice, panels, sanctions, renames, guests, log, tuning });
     const regions = new RegionService(client, log);
     const actions = new ActionService({ store, queue, channels, panels, sanctions, renames, regions, log });
+    // Has to exist before the client connects: it needs to see the client become ready.
+    const music = options.music
+      ? new MusicService({
+          client,
+          store,
+          queue,
+          channels,
+          log,
+          tuning,
+          config: options.music,
+          clientOptions: options.clientOptions,
+        })
+      : null;
 
-    this.context = { client, store, log, voice, channels, panels, sanctions, actions, regions };
+    this.context = { client, store, log, voice, channels, panels, sanctions, actions, regions, music };
     registerEvents(this.context);
     // discord.js reconnects by itself after ordinary drops; this fires only when it has given up.
     client.on(Events.ShardDisconnect, (closeEvent) => options.onFatalDisconnect?.(closeEvent.code));
@@ -87,6 +106,8 @@ export class Bot {
   /** Connects to Discord. Resolves once logged in; the bot is fully up when the client emits `clientReady`. */
   async start(): Promise<void> {
     await this.client.login(this.options.token);
+    // The helper bots come second: a problem with one of them must not hold up the main bot.
+    await this.context.music?.start();
 
     this.sweepTimer = setInterval(() => void this.context.channels.sweep(), this.tuning.sweepIntervalMs);
     this.sweepTimer.unref();
@@ -109,7 +130,7 @@ export class Bot {
     this.renames.stop();
 
     let timer: NodeJS.Timeout | undefined;
-    const disconnected = this.client.destroy().then(
+    const disconnected = Promise.all([this.client.destroy(), this.context.music?.stop()]).then(
       () => true,
       (error: unknown) => {
         log.warn('Could not disconnect from Discord cleanly', error);

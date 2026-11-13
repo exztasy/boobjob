@@ -20,6 +20,11 @@ export interface OverwriteInput {
   privacy: Privacy;
   allowed: readonly string[];
   blocked: readonly string[];
+  /**
+   * Bots of ours that are at work in the channel right now, such as the one
+   * playing music there. They get in regardless of privacy and lists.
+   */
+  guests?: readonly string[];
 }
 
 const { ViewChannel, Connect, ManageRoles, Administrator } = PermissionFlagsBits;
@@ -42,6 +47,13 @@ export const BOT_CHANNEL_PERMISSIONS =
   PermissionFlagsBits.SendMessages |
   PermissionFlagsBits.ReadMessageHistory;
 
+/**
+ * What a bot of ours gets while it works in a channel: getting in, being
+ * heard, and getting in even when the owner's user limit says the channel is
+ * full (which is what Move Members does for whoever holds it).
+ */
+export const GUEST_PERMISSIONS = ViewChannel | Connect | PermissionFlagsBits.Speak | PermissionFlagsBits.MoveMembers;
+
 /** Discord's cap on permission overwrites per channel. */
 export const MAX_OVERWRITES = 100;
 
@@ -56,7 +68,8 @@ export const MAX_OVERWRITES = 100;
  *    the same for Connect only; `public` changes nothing.
  * 2. Blocked users are denied View Channel and Connect.
  * 3. Allowed users and the owner are granted View Channel and Connect.
- * 4. The bot is granted what it needs to run the channel.
+ * 4. The bot is granted what it needs to run the channel, and any bot of ours
+ *    that is working in it what it needs to do that.
  *
  * A member's own overwrite beats any role overwrite, which is what makes the
  * allow and block lists work regardless of roles.
@@ -89,13 +102,15 @@ export function buildOverwrites(input: OverwriteInput): Overwrite[] {
   }
 
   const special = new Set([input.ownerId, input.botId]);
-  const blocked = unique(input.blocked).filter((id) => !special.has(id));
+  const guests = unique(input.guests ?? []).filter((id) => id !== input.ownerId);
+  const blocked = unique(input.blocked).filter((id) => !special.has(id) && !guests.includes(id));
   const allowed = unique(input.allowed).filter((id) => !special.has(id) && !blocked.includes(id));
 
   for (const id of blocked) refuse(entry(id, OverwriteType.Member), ACCESS);
   for (const id of allowed) grant(entry(id, OverwriteType.Member), ACCESS);
   grant(entry(input.ownerId, OverwriteType.Member), ACCESS);
   grant(entry(input.botId, OverwriteType.Member), BOT_CHANNEL_PERMISSIONS);
+  for (const id of guests) grant(entry(id, OverwriteType.Member), GUEST_PERMISSIONS);
 
   if ((input.botPermissions & Administrator) === 0n) {
     // Discord rejects the whole request if it touches a permission the bot lacks, and
@@ -108,10 +123,9 @@ export function buildOverwrites(input: OverwriteInput): Overwrite[] {
   }
 
   // If the cap forces something out, the overwrites that keep people out must be the last to go.
-  const inherited = [...entries.keys()].filter(
-    (id) => id !== input.everyoneId && !special.has(id) && !blocked.includes(id) && !allowed.includes(id),
-  );
-  const order = [input.everyoneId, input.botId, input.ownerId, ...blocked, ...inherited, ...allowed];
+  const placed = new Set([input.everyoneId, ...special, ...guests, ...blocked, ...allowed]);
+  const inherited = [...entries.keys()].filter((id) => !placed.has(id));
+  const order = unique([input.everyoneId, input.botId, input.ownerId, ...guests, ...blocked, ...inherited, ...allowed]);
 
   return order
     .map((id) => entries.get(id))

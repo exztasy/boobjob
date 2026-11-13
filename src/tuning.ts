@@ -21,6 +21,24 @@ export interface Tuning {
    * typically allows before it kills the process.
    */
   shutdownTimeoutMs: number;
+
+  /** How long a music bot stays in a channel once it has nothing left to play. */
+  musicIdleMs: number;
+  /** How long a music bot keeps playing to a channel with nobody in it. */
+  musicAloneMs: number;
+  /** How long Discord gets to confirm that a music bot has joined a voice channel. */
+  voiceJoinTimeoutMs: number;
+  /**
+   * After the audio connection between Lavalink and Discord dropped, how
+   * long it gets to come back by itself before the music is called off.
+   */
+  voiceRecoveryMs: number;
+  /** How long to wait before trying again to reach a Lavalink server that is down. */
+  lavalinkRetryMs: number;
+  /** How long a single request to Lavalink may take. Looking up a long playlist takes a while. */
+  lavalinkRequestTimeoutMs: number;
+  /** How often the connection to Lavalink is checked for still being alive. */
+  lavalinkPingMs: number;
 }
 
 export const DEFAULT_TUNING: Tuning = {
@@ -33,4 +51,11 @@ export const DEFAULT_TUNING: Tuning = {
   failureNoticeCooldownMs: 60_000,
   failureNoticeTtlMs: 30_000,
   shutdownTimeoutMs: 5_000,
+  musicIdleMs: 5 * 60_000,
+  musicAloneMs: 60_000,
+  voiceJoinTimeoutMs: 10_000,
+  voiceRecoveryMs: 10_000,
+  lavalinkRetryMs: 5_000,
+  lavalinkRequestTimeoutMs: 20_000,
+  lavalinkPingMs: 30_000,
 };

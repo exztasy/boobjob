@@ -1,8 +1,10 @@
 import { MessageFlags, RESTJSONErrorCodes, type Interaction } from 'discord.js';
 import type { BotContext } from '../context.js';
+import { parseMusicId } from '../ui/ids.js';
 import { hasApiCode } from '../util/discord.js';
 import { handleAutocomplete, handleCommand } from './commands.js';
 import { handleButton, handleModal, handleStringSelect, handleUserSelect } from './components.js';
+import { handleMusicButton, handleMusicCommand } from './music.js';
 
 /** Sends an interaction to its handler and makes sure a failure never goes unanswered. */
 export async function handleInteraction(context: BotContext, interaction: Interaction): Promise<void> {
@@ -36,9 +38,13 @@ async function dispatch(context: BotContext, interaction: Interaction): Promise<
     return;
   }
 
-  if (interaction.isChatInputCommand()) return handleCommand(context, interaction);
+  if (interaction.isChatInputCommand()) {
+    return interaction.commandName === 'music' ? handleMusicCommand(context, interaction) : handleCommand(context, interaction);
+  }
   if (interaction.isAutocomplete()) return handleAutocomplete(context, interaction);
-  if (interaction.isButton()) return handleButton(context, interaction);
+  if (interaction.isButton()) {
+    return parseMusicId(interaction.customId) ? handleMusicButton(context, interaction) : handleButton(context, interaction);
+  }
   if (interaction.isStringSelectMenu()) return handleStringSelect(context, interaction);
   if (interaction.isUserSelectMenu()) return handleUserSelect(context, interaction);
   if (interaction.isModalSubmit()) return handleModal(context, interaction);
