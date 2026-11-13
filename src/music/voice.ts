@@ -51,10 +51,6 @@ export class VoiceLink {
     private readonly handlers: VoiceHandlers,
   ) {}
 
-  has(guildId: string): boolean {
-    return this.connections.has(guildId);
-  }
-
   /**
    * Joins a voice channel and resolves with what Lavalink needs to connect.
    * Discord does not say no when the bot may not join; it just stays silent,
