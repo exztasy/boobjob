@@ -4,20 +4,51 @@ services:
     restart: unless-stopped
     # A tiny init process as PID 1: forwards signals and reaps stray processes.
     init: true
-    # DISCORD_TOKEN and LOG_LEVEL come from here.
+    # The tokens, LAVALINK_PASSWORD and LOG_LEVEL come from here.
     env_file: .env
     environment:
       # Always inside the volume below, whatever .env says, so that settings
       # survive rebuilding or recreating the container.
       DATABASE_PATH: /app/data/bot.sqlite
+      # Lavalink is the service below, reached over the network Compose sets up.
+      LAVALINK_HOST: lavalink
+      LAVALINK_PORT: "2333"
+      LAVALINK_SECURE: "false"
     volumes:
       - data:/app/data
+    # Only the order they start in: the bot waits for Lavalink by itself.
+    depends_on:
+      - lavalink
     # Without limits Docker keeps every log line forever.
-    logging:
+    logging: &logging
       driver: json-file
       options:
         max-size: 10m
         max-file: "3"
+
+  lavalink:
+    # Lavalink 4.2 or newer is needed: it speaks the end-to-end encrypted voice
+    # protocol (DAVE) that Discord requires.
+    image: ghcr.io/lavalink-devs/lavalink:4.2.2
+    restart: unless-stopped
+    environment:
+      # Lavalink's own name for its password setting.
+      LAVALINK_SERVER_PASSWORD: ${LAVALINK_PASSWORD:?Set LAVALINK_PASSWORD in .env (see .env.example)}
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
+      SPOTIFY_COUNTRY_CODE: ${SPOTIFY_COUNTRY_CODE:-US}
+      # By default Java takes up to a quarter of the machine's memory. To set a
+      # limit yourself (a few hundred MB is plenty for a few channels):
+      # _JAVA_OPTIONS: -Xmx512M
+    volumes:
+      - ./lavalink/application.yml:/opt/Lavalink/application.yml:ro
+    # Lavalink downloads its plugins (YouTube, Spotify) when it starts, and
+    # keeps them in the container. They are fetched again only when the
+    # container is recreated, for example after changing application.yml.
+    #
+    # No ports are published: the bot reaches Lavalink on Compose's own network,
+    # and nothing outside this machine can.
+    logging: *logging
 
 volumes:
   data:

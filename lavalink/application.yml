@@ -1,0 +1,96 @@
+# Lavalink fetches and streams the music that the bot plays. This is its
+# configuration, as compose.yaml runs it; https://lavalink.dev documents every
+# setting. Values written as ${NAME} come from the environment, which
+# compose.yaml fills in from your .env file.
+#
+# The password is not in this file. Lavalink reads it from the environment
+# variable LAVALINK_SERVER_PASSWORD, which compose.yaml sets to LAVALINK_PASSWORD
+# from .env. Without that variable Lavalink has no password and turns every
+# request away, instead of accepting one that anyone could read here.
+
+server:
+  port: 2333
+  address: 0.0.0.0
+
+lavalink:
+  plugins:
+    # YouTube changes often in ways that break playback; when it stops working,
+    # a newer version of this plugin is usually the fix. Lavalink logs a
+    # warning at startup when one is out.
+    # Releases: https://github.com/lavalink-devs/youtube-source/releases
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.2"
+      snapshot: false
+    # Spotify. Releases: https://github.com/topi314/LavaSrc/releases
+    - dependency: "com.github.topi314.lavasrc:lavasrc-plugin:4.8.3"
+      snapshot: false
+
+  server:
+    sources:
+      # Replaced by the plugin above. Lavalink's own YouTube source no longer works.
+      youtube: false
+      soundcloud: true
+      bandcamp: true
+      twitch: true
+      vimeo: true
+      nico: false
+      # Off on purpose: with these, anyone who can use /music could make this
+      # server fetch any web address, or read files from its disk.
+      http: false
+      local: false
+    # Number of pages of 100 tracks to load from a YouTube playlist.
+    youtubePlaylistLoadLimit: 6
+    youtubeSearchEnabled: true
+    soundcloudSearchEnabled: true
+    # SoundCloud offers 30-second previews of tracks it will not play in full; skip those.
+    soundcloudFilterOutPreviewTracks: true
+    # Seconds between position updates sent to the bot.
+    playerUpdateInterval: 5
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: true
+    allowDirectPlaylistIds: true
+    # Tried in this order. MUSIC only searches (it is what ytmsearch: uses).
+    clients:
+      - MUSIC
+      - ANDROID_VR
+      - WEB
+      - WEBEMBEDDED
+    # If YouTube starts asking the server to "sign in to confirm you're not a
+    # bot", it can play as a Google account instead. Use a throwaway account,
+    # never your own: YouTube may suspend it. On first start the log explains
+    # how to link it, and then prints a refresh token to put here.
+    # oauth:
+    #   enabled: true
+    #   refreshToken: "paste the refresh token here"
+
+  lavasrc:
+    # Spotify does not stream to bots. Tracks from Spotify links are played by
+    # finding the same recording on YouTube: by its ISRC code first, then by
+    # artist and title.
+    providers:
+      - 'ytsearch:"%ISRC%"'
+      - "ytsearch:%QUERY%"
+    sources:
+      spotify: true
+    spotify:
+      # From an app at https://developer.spotify.com/dashboard. Without them
+      # LavaSrc falls back to an anonymous token, which Spotify often refuses.
+      clientId: "${SPOTIFY_CLIENT_ID:}"
+      clientSecret: "${SPOTIFY_CLIENT_SECRET:}"
+      # Market used for artists' top tracks and availability.
+      countryCode: "${SPOTIFY_COUNTRY_CODE:US}"
+      # Pages of 100 (playlists) and 50 (albums) tracks to load.
+      playlistLoadLimit: 6
+      albumLoadLimit: 6
+
+logging:
+  level:
+    root: INFO
+    lavalink: INFO
+  # Lavalink can log every request it gets, but those carry the bot's voice
+  # connection tokens, and the bot's own log already says what it asked for.
+  request:
+    enabled: false

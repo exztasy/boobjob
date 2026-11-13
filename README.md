@@ -2,6 +2,8 @@
 
 A Discord bot for dynamic voice channels. A member joins a hub channel and gets a voice channel of their own: private, hidden, and theirs to run. Whatever they change is remembered and applied again the next time they join the hub.
 
+It also plays music from YouTube, Spotify and SoundCloud, in as many voice channels at once as it has bot accounts to play with.
+
 ## What it does
 
 - **Join to create.** Joining a hub channel creates a personal voice channel, moves the member into it and posts a control panel in the channel's chat. The channel is removed when the last person leaves.
@@ -11,11 +13,12 @@ A Discord bot for dynamic voice channels. A member joins a hub channel and gets 
 - **Access.** The owner picks who can see and join the channel, and who is kept out.
 - **Moderation.** The owner can kick, mute and deafen people in the channel.
 - **Ownership.** The owner can hand the channel over. If the owner leaves, someone still in the channel can claim it.
+- **Music.** `/music play` with a link or a search, and a bot joins your voice channel and plays it, with a queue and controls. Extra bot accounts let several channels have music at the same time, all run through the one bot people talk to.
 
 ## Requirements
 
-- A Discord application with a bot user
-- Either Docker with the Compose plugin, or Node.js 22.13 or newer
+- A Discord application with a bot user, plus one more for each extra voice channel that should be able to play music at the same time (optional)
+- Either Docker with the Compose plugin, which also runs the music server, or Node.js 22.13 or newer and a [Lavalink](https://lavalink.dev) 4.2 server for music
 
 Settings are stored in a SQLite file using Node's built-in SQLite, so there is no database server to run and nothing native to compile.
 
@@ -41,6 +44,10 @@ Put the token into `.env` as `DISCORD_TOKEN`.
 | `DISCORD_TOKEN` | (required) | The bot token |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent` |
 | `DATABASE_PATH` | `./data/bot.sqlite` | Where settings are stored; created on first start. Ignored with Docker Compose, which keeps the database in a volume. |
+| `LAVALINK_PASSWORD` | (empty: no music) | Password shared by the bot and Lavalink. Make one up. Required with Docker Compose. |
+| `MUSIC_BOT_TOKENS` | (empty) | Tokens of extra music bots, separated by commas. See [Music](#music). |
+| `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` | (empty) | For Spotify links and searches. See [Spotify](#spotify). |
+| `LAVALINK_HOST`, `LAVALINK_PORT`, `LAVALINK_SECURE` | `localhost`, `2333`, `false` | Where Lavalink is, when you run it yourself. Docker Compose sets these. |
 
 **With Docker** (the easy way to run it on a server):
 
@@ -48,7 +55,7 @@ Put the token into `.env` as `DISCORD_TOKEN`.
 docker compose up -d --build
 ```
 
-That builds the image and starts the bot in the background. It comes back by itself after a crash or a reboot, and its settings are kept in a Docker volume. See [Running with Docker](#running-with-docker) for updating, logs and backups.
+That builds the image and starts the bot and its music server in the background. Both come back by themselves after a crash or a reboot, and the bot's settings are kept in a Docker volume. See [Running with Docker](#running-with-docker) for updating, logs and backups.
 
 **Without Docker:**
 
@@ -79,6 +86,65 @@ In the server, run:
 This creates a voice channel named "➕ Create a channel". Join it and you have your own channel. To use a channel you already have instead, run `/voicehub add`.
 
 `/voicehub list` shows the hubs and checks the bot's permissions, and says exactly what to fix if something is missing.
+
+## Music
+
+Music needs a [Lavalink](https://lavalink.dev) server: it fetches the audio from YouTube, Spotify and SoundCloud and streams it into Discord. With Docker Compose it runs next to the bot and is set up already. Put a password into `.env`, any long random string:
+
+```
+LAVALINK_PASSWORD=change-me-to-something-long-and-random
+```
+
+That is all it takes for one channel at a time: the bot itself joins your voice channel and plays.
+
+### More channels at once: extra music bots
+
+A Discord bot can be in one voice channel per server, so every extra voice channel that should have music at the same time needs another bot account. People still only talk to the main bot; the extra ones just play.
+
+1. In the [Developer Portal](https://discord.com/developers/applications), create another application, and on its **Bot** page reset and copy the token. It needs no intents and no special settings. Name it so people can tell, for example "Music 1".
+2. Add the token to `MUSIC_BOT_TOKENS` in `.env`. Several are separated by commas:
+   ```
+   MUSIC_BOT_TOKENS=first-token,second-token
+   ```
+3. Restart the bot. For each extra bot it logs an invite link asking for View Channels, Connect and Speak. Invite each one to your server. `/music bots` lists them too, with invite links for those not in the server yet (for members with Manage Server).
+
+When someone asks for music, a free extra bot goes first; the main bot plays only when they are all busy. With two extra bots, three voice channels can have music at once.
+
+### Spotify
+
+Spotify does not stream to bots. For a Spotify track, Lavalink plays the same recording from YouTube, matched by its ISRC code, or by artist and title. To read Spotify links and search Spotify it needs an app:
+
+1. Create an app at the [Spotify developer dashboard](https://developer.spotify.com/dashboard). Any name and description; the redirect URI is not used (enter `http://127.0.0.1/` if one is required) and Web API is the API to pick.
+2. Copy its client ID and client secret into `.env` as `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`, and restart: `docker compose up -d`.
+
+Without them, Lavalink tries an anonymous token, which Spotify often refuses.
+
+### YouTube
+
+YouTube goes through Lavalink's [YouTube plugin](https://github.com/lavalink-devs/youtube-source). YouTube keeps changing, and blocks servers it takes for bots:
+
+- **Playback stops working for everything.** A newer plugin version is usually the fix. Lavalink logs a warning at startup when one is out. Put the new version number in `lavalink/application.yml` and run `docker compose up -d`.
+- **"Sign in to confirm you're not a bot".** YouTube has flagged the server's IP address. The plugin can sign in with a Google account: see the `oauth` lines in `lavalink/application.yml` and [the plugin's guide](https://github.com/lavalink-devs/youtube-source#using-oauth-tokens). Use a throwaway account, never your own.
+
+### Using it
+
+Join a voice channel and run `/music play` with a YouTube, Spotify or SoundCloud link (a song, playlist or album), or with words to search for. A bot joins your channel and plays; more requests queue up behind it. A message in the channel's chat shows what is playing and what comes next, with buttons for pause, skip, stop, loop and shuffle. Replies to commands are only shown to the person who asked.
+
+Anyone in the voice channel can control its music; you have to be in the channel to do so.
+
+| Command | |
+| --- | --- |
+| `/music play <query> [source]` | Play a link or the first search result, or add it to the queue. Searches go to YouTube unless you pick YouTube Music, Spotify or SoundCloud. |
+| `/music pause` · `/music resume` | Pause and carry on |
+| `/music skip` | Skip to the next track |
+| `/music stop` | Stop, clear the queue and send the bot away |
+| `/music queue [page]` | What is playing and what is up next |
+| `/music nowplaying` | The current track and how far along it is |
+| `/music volume <percent>` | 0 to 150; 100 is normal |
+| `/music loop <mode>` | Off, the current track, or the whole queue |
+| `/music shuffle` | Shuffle the waiting tracks |
+| `/music remove <position>` | Take a track out of the queue |
+| `/music bots` | Which music bots there are and what each one is doing |
 
 ## Using it
 
@@ -155,6 +221,14 @@ For server admins (requires Manage Server by default):
 
 **Restarts.** State lives in the database, so channels and their panels keep working across a restart. On startup the bot removes channels that emptied while it was offline, serves anyone waiting in a hub, and lifts mutes that should have ended.
 
+**Music in personal channels.** A personal channel is usually hidden, so the bot that plays in it is let in for as long as it plays there, even if the channel is full, and loses that access afterwards. In other channels a music bot only goes where its own permissions let it; the bot tells you if none of them can.
+
+**When the music stops.** A bot leaves when nobody has been listening for a minute, when the queue has been empty for five minutes, when someone disconnects it or drags it elsewhere, or when its channel is deleted. Bots do not count as listeners, and do not keep a personal channel alive. The "now playing" message then says why the music stopped.
+
+**Queue.** A channel's queue holds up to 500 tracks and lasts as long as the bot stays; it is not kept across restarts. A track that cannot be played is skipped and the message says why. After five failures in a row playback stops rather than work through the rest of the queue, because the source is probably broken; the queue is kept, and `/music skip` carries on.
+
+**When Lavalink is down.** Music that was playing stops, the bot keeps trying to reconnect every few seconds, and `/music play` says that the music server cannot be reached until it is back. Everything else keeps working.
+
 ## Permissions
 
 The invite link asks for these. Grant them on the bot's role, server-wide.
@@ -166,8 +240,9 @@ The invite link asks for these. Grant them on the bot's role, server-wide.
 | Manage Roles | To set who can see and join a channel. Discord files channel permissions under this permission. The bot never touches roles. |
 | Move Members | To move people into their channel, and to kick. |
 | Mute Members, Deafen Members | For mute and deafen. |
-| Send Messages, Read Message History | For the control panel. |
-| Speak, Video, Add Reactions, Embed Links and other everyday permissions | Not used by the bot. Discord only lets a bot copy a permission into a channel's overrides if the bot holds it, and the bot has to copy the category's restrictions onto each personal channel. |
+| Send Messages, Read Message History | For the control panel and the music message. |
+| Speak | To play music. |
+| Video, Add Reactions, Embed Links and other everyday permissions | Not used by the bot. Discord only lets a bot copy a permission into a channel's overrides if the bot holds it, and the bot has to copy the category's restrictions onto each personal channel. |
 
 The bot does not need Administrator. If a category has overrides for permissions the bot lacks (for example Manage Messages for a moderator role), those cannot be carried over to personal channels; `/voicehub list` tells you which ones, and the bot logs it once. Add them to the bot's role if you rely on them.
 
@@ -175,14 +250,24 @@ Moderators without Administrator cannot see hidden channels. Server administrato
 
 If you remove the bot from a server while someone is muted or deafened through it, a moderator has to lift that by hand.
 
+Extra music bots need View Channels, Connect and Speak, which their invite links ask for. They never change anything in the server.
+
 ## Running with Docker
 
 `compose.yaml` builds the image from this repository and runs it with a restart policy, a named volume for the database, and log rotation. The image contains only the compiled bot and its runtime dependencies, and the bot runs as an unprivileged user.
 
-Follow the log:
+Next to it runs Lavalink, the music server, from its official image and with its settings from `lavalink/application.yml`. It is reachable only by the bot, on the network Compose sets up for them; no port is opened on the machine. On every start it downloads its YouTube and Spotify plugins if it does not have them, and checks for newer versions, so it needs to reach `maven.lavalink.dev`; until it can, it keeps restarting.
+
+Follow the logs:
 
 ```bash
 docker compose logs -f
+```
+
+Only the music server's:
+
+```bash
+docker compose logs -f lavalink
 ```
 
 Update to a newer version of the bot (settings are kept):
@@ -195,7 +280,7 @@ git pull
 docker compose up -d --build
 ```
 
-Apply a change to `.env`:
+Apply a change to `.env` or `lavalink/application.yml`:
 
 ```bash
 docker compose up -d
@@ -254,6 +339,8 @@ The third command matters: a file copied into a container belongs to root, and t
 - **Node version.** The image is built on Node 26. To use another release line (22 or newer), change `NODE_VERSION` at the top of the `Dockerfile`.
 - **Without Compose.** `docker build -t boobjob .` and then `docker run -d --name boobjob --restart unless-stopped --init --env-file .env -v boobjob-data:/app/data boobjob`.
 - **A host folder instead of a volume.** If you mount a folder from the host on `/app/data`, it has to be writable by user id 1000, which is what the bot runs as: `sudo chown 1000:1000 ./data`.
+- **Lavalink's memory.** Java takes up to a quarter of the machine's memory by default. To set a limit, uncomment `_JAVA_OPTIONS` in `compose.yaml`.
+- **Lavalink without Compose.** It runs anywhere with Java 17 or newer: download `Lavalink.jar` from [its releases](https://github.com/lavalink-devs/Lavalink/releases) (4.2 or newer), put `lavalink/application.yml` next to it, and start it with `LAVALINK_SERVER_PASSWORD` set to the bot's `LAVALINK_PASSWORD` (and the Spotify variables, if you use them) in its environment: `java -jar Lavalink.jar`. Then point the bot at it with `LAVALINK_HOST` and `LAVALINK_PORT`. Do not expose it to the internet: anyone with the password can use it.
 
 ## Data
 
@@ -275,7 +362,7 @@ npm test
 npm run typecheck
 ```
 
-The tests start the real bot against a fake Discord (`test/support/fakeDiscord.ts`): a local gateway plus a REST handler that keeps server state and refuses what Discord would refuse (missing permissions, malformed components, voice changes for members who are not connected). No token or network access is needed.
+The tests start the real bot against a fake Discord (`test/support/fakeDiscord.ts`): a local gateway plus a REST handler that keeps server state and refuses what Discord would refuse (missing permissions, malformed components, voice changes for members who are not connected). It serves several bot accounts at once and answers voice requests the way Discord does. Music is tested against a fake Lavalink (`test/support/fakeLavalink.ts`), a local HTTP and websocket server speaking Lavalink's protocol, which lets a test decide when a track ends or fails. No token or network access is needed.
 
 ```
 src/
@@ -284,10 +371,12 @@ src/
   events.ts         Discord events → services
   domain/           pure logic: permission overwrites, settings, rename limit
   services/         channel lifecycle, owner actions, mute/deafen, panel, renames
+  music/            music: the bot pool, sessions and queues, voice connections, the Lavalink client
   interactions/     slash commands, buttons, menus, forms
-  ui/               the control panel and its menus
+  ui/               the control panel, the music message, menus
   storage/          SQLite schema and queries
-test/               unit tests and end-to-end tests against the fake Discord
+test/               unit tests and end-to-end tests against the fake Discord and the fake Lavalink
+lavalink/           the music server's configuration
 Dockerfile          the image: compiled code, runtime dependencies, unprivileged user
-compose.yaml        how to run it: restart policy, data volume, log rotation
+compose.yaml        how to run it: the bot and Lavalink, restart policy, data volume, log rotation
 ```
