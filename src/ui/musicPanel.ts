@@ -8,7 +8,7 @@ import {
   TextDisplayBuilder,
   userMention,
 } from 'discord.js';
-import { formatDuration, trackLine } from '../music/format.js';
+import { compactLine, formatDuration, trackLine } from '../music/format.js';
 import type { LoopMode, QueueItem } from '../music/queue.js';
 import { MusicButton } from './ids.js';
 import type { PanelMessage } from './panel.js';
@@ -103,7 +103,7 @@ function upNext(view: MusicPanelView): string[] {
   const count = view.upcoming.length;
   if (count === 0) return ['**Up next**', 'Nothing queued.'];
 
-  const lines = view.upcoming.slice(0, UPCOMING_SHOWN).map((item, index) => `${index + 1}. ${trackLine(item.track)}`);
+  const lines = view.upcoming.slice(0, UPCOMING_SHOWN).map((item, index) => `${index + 1}. ${compactLine(item.track)}`);
   const rest = count - lines.length;
   return [
     `**Up next** · ${count === 1 ? '1 track' : `${count} tracks`} · \`${formatDuration(view.upcomingDuration)}\``,

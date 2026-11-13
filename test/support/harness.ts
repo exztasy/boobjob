@@ -92,6 +92,8 @@ export interface MusicOptions {
   password?: string;
   /** Set to false to start without waiting for every bot to reach the music server. */
   waitForLavalink?: boolean;
+  /** The music server is down when the bot starts; `lavalink.start()` brings it up. */
+  lavalinkDown?: boolean;
 }
 
 export interface WorldOptions extends Partial<FakeDiscordOptions> {
@@ -115,7 +117,9 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
   const helpers: string[] = [];
   if (musicOptions) {
     lavalink = new FakeLavalink();
+    // Started even when it is meant to be down, to settle on a port it can come back on.
     await lavalink.start();
+    if (musicOptions.lavalinkDown) await lavalink.stop();
     const specs: HelperSpec[] =
       typeof musicOptions.helpers === 'number'
         ? Array.from({ length: musicOptions.helpers }, () => ({}))
@@ -150,13 +154,22 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
   prepare?.(fake, ids);
 
   await fake.start();
-  const { bot, log } = await startBot(fake, {
-    tuning,
-    databasePath,
-    onFatalDisconnect,
-    music,
-    waitForLavalink: musicOptions?.waitForLavalink,
-  });
+  let started;
+  try {
+    started = await startBot(fake, {
+      tuning,
+      databasePath,
+      onFatalDisconnect,
+      music,
+      waitForLavalink: musicOptions?.lavalinkDown ? false : musicOptions?.waitForLavalink,
+    });
+  } catch (error) {
+    // A world that did not come up must not linger and keep the test process alive.
+    await fake.stop();
+    await lavalink?.stop();
+    throw error;
+  }
+  const { bot, log } = started;
   if (registerHub) bot.store.addHub(fake.guildId, hub);
   return { fake, bot, log, lavalink, ...ids };
 }
@@ -183,14 +196,22 @@ export async function startBot(
     onFatalDisconnect: options.onFatalDisconnect,
     music: options.music,
   });
-  await bot.start();
-  await until(
-    () => bot.client.isReady() && fake.requestsTo('PUT', /\/commands$/u).length > registrationsBefore,
-    'the bot to finish starting up',
-  );
-  const music = bot.context.music;
-  if (music && options.waitForLavalink !== false) {
-    await until(() => music.bots.every((player) => player.usable), 'every music bot to reach the music server');
+  try {
+    await bot.start();
+    await until(
+      () => bot.client.isReady() && fake.requestsTo('PUT', /\/commands$/u).length > registrationsBefore,
+      'the bot to finish starting up',
+    );
+    const music = bot.context.music;
+    if (music && options.waitForLavalink !== false) {
+      await until(
+        () => music.bots.every((player) => player.usable || player.loginFailed),
+        'every music bot to reach the music server',
+      );
+    }
+  } catch (error) {
+    await bot.stop();
+    throw error;
   }
   return { bot, log };
 }

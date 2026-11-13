@@ -240,6 +240,13 @@ export class FakeLavalink {
     this.emit(session, { type: 'WebSocketClosedEvent', guildId, code, reason, byRemote: true });
   }
 
+  /** The audio connection of a bot's player comes back by itself. */
+  restoreVoice(userId: string, guildId: string): void {
+    const player = this.sessionOf(userId)?.players.get(guildId);
+    if (!player) throw new Error(`Bot ${userId} has no player in guild ${guildId}`);
+    player.connected = true;
+  }
+
   /** Reports where a track is, as Lavalink does every few seconds. */
   reportPosition(userId: string, guildId: string, position: number): void {
     const session = this.sessionOf(userId);

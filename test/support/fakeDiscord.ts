@@ -395,6 +395,13 @@ export class FakeDiscord {
     this.changeVoice(userId, { channel_id: null });
   }
 
+  /** Discord moves a bot's voice connection to another voice server, as when the channel's region changes. */
+  newVoiceServer(botId: string): void {
+    if (!this.voiceOf(botId).channel_id) throw new Error(`Bot ${botId} is not in a voice channel`);
+    const server = { token: `voice-token-${++this.voiceServers}`, guild_id: this.guildId, endpoint: VOICE_ENDPOINT };
+    this.dispatch('VOICE_SERVER_UPDATE', server, (recipient) => recipient === botId);
+  }
+
   /** From now on Discord does not answer this bot's voice requests, as when it cannot place it anywhere. */
   ignoreVoiceRequests(botId: string): void {
     this.voiceIgnored.add(botId);

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { PermissionFlagsBits as P } from 'discord.js';
+import { INVITE_PERMISSIONS } from '../src/permissions.js';
 import { MusicButton } from '../src/ui/ids.js';
 import { findComponent, textOf, VOICE_ENDPOINT } from './support/fakeDiscord.js';
 import { createChannelFor, createWorld, destroyWorld, settle, until, type World } from './support/harness.js';
@@ -103,7 +105,7 @@ test('more requests in the same channel queue up behind the current track', asyn
   await startsPlaying(world, helper, 'Second song');
   const panel = await panelShows(fake, channelId, /Now playing\*\*\n\*\*\[Second song\]/u);
   assert.match(textOf(panel), new RegExp(`Requested by <@${bob}>`, 'u'));
-  assert.match(textOf(panel), /Up next\*\* · 1 track · `0:30`\n1\. \*\*\[Third song\]/u);
+  assert.match(textOf(panel), /Up next\*\* · 1 track · `0:30`\n1\. \*\*Third song\*\*/u);
 
   lavalink!.finishTrack(helper, fake.guildId);
   await startsPlaying(world, helper, 'Third song');
@@ -355,5 +357,52 @@ test('the controls of music that is over are cleared away when someone presses t
   const result = await fake.click(alice, stale, MusicButton.Skip);
   assert.match(textOf(result.message!), /The music has stopped/u);
   assert.equal(findComponent(result.message!, MusicButton.Skip), undefined);
+  assertClean(world);
+});
+
+test('long, oddly formatted titles still fit into every message', async (t) => {
+  const world = await musicWorld(t, { music: { helpers: 3 } });
+  const { fake, lavalink, alice } = world;
+  const url = 'https://www.youtube.com/playlist?list=PLodd';
+  lavalink!.addPlaylist(
+    '*'.repeat(200),
+    Array.from({ length: 30 }, (_, index) => ({
+      title: `${'*_`|'.repeat(30)} ${index}`,
+      author: '\\'.repeat(60),
+      length: 36_000_000,
+      uri: `https://x.example/${'(a)'.repeat(60)}`,
+    })),
+    { uri: url },
+  );
+  const { channelId } = await createChannelFor(world, alice);
+
+  await music(world, alice, 'play', { query: url });
+  await music(world, alice, 'queue');
+  await music(world, alice, 'queue', { page: 3 });
+  await music(world, alice, 'nowplaying');
+  await music(world, fake.ownerId, 'bots');
+  await panelShows(fake, channelId, /Up next\*\* · 29 tracks/u);
+  assertClean(world);
+});
+
+test('music plays where the bot may not post its message', async (t) => {
+  const world = await musicWorld(t, {
+    botPermissions: INVITE_PERMISSIONS,
+    prepare: (fake, { lounge }) => {
+      fake.editChannelByHand(lounge, {
+        permission_overwrites: [{ id: fake.botRoleId, type: 0, allow: '0', deny: String(P.SendMessages) }],
+      });
+    },
+  });
+  const { fake, lavalink, alice, lounge, helpers } = world;
+  lavalink!.addTrack({ title: 'Song' });
+  fake.join(alice, lounge);
+
+  assert.match(await music(world, alice, 'play', { query: 'song' }), /Now playing/u);
+  await startsPlaying(world, helpers[0]!, 'Song');
+  await settle(50);
+  assert.equal(musicPanelIn(fake, lounge), undefined);
+  assert.deepEqual(fake.requestsTo('POST', new RegExp(`/channels/${lounge}/messages`, 'u')).length, 1, 'it tried once, not on every change');
+  assert.match(await music(world, alice, 'skip'), /last track/u);
   assertClean(world);
 });

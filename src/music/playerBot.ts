@@ -43,6 +43,8 @@ export interface PlayerBotDeps {
  */
 export class PlayerBot {
   readonly voice: VoiceLink;
+  /** Discord refused to let this bot log in; it stays out of the pool until a restart. */
+  loginFailed = false;
   private lavalink: LavalinkNode | null = null;
 
   constructor(

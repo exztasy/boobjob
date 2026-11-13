@@ -25,7 +25,7 @@ import { renderEndedMusicPanel, renderMusicPanel, type MusicPanelView } from '..
 import type { PanelMessage } from '../ui/panel.js';
 import { describeError, hasApiCode, humanCount, isInvalidToken, isVoiceChannel } from '../util/discord.js';
 import type { KeyedQueue } from '../util/keyedQueue.js';
-import { compactLine, describeException, formatDuration, plainText, trackLine, trackTitle } from './format.js';
+import { compactLine, describeException, fitLines, formatDuration, plainText, trackLine, trackTitle } from './format.js';
 import {
   LavalinkError,
   type LoadResult,
@@ -142,6 +142,9 @@ export class MusicService {
         try {
           await bot.client.login(config.botTokens[bot.index - 1]!);
         } catch (error) {
+          bot.loginFailed = true;
+          // Whatever the client set up on its way to failing has to go, or it keeps the process alive.
+          await bot.client.destroy().catch(() => undefined);
           if (isInvalidToken(error)) {
             log.error(
               `Discord rejected the token of music bot #${bot.index} (entry ${bot.index} of MUSIC_BOT_TOKENS). Carrying on without it.`,
@@ -355,7 +358,7 @@ export class MusicService {
       );
       if (pages > 1) lines.push(`-# Page ${shown} of ${pages}. \`/music queue page:<number>\` shows another one.`);
     }
-    return lines.join('\n');
+    return fitLines(lines);
   }
 
   nowPlaying(member: GuildMember): string {
@@ -390,8 +393,10 @@ export class MusicService {
     for (const bot of this.bots) {
       const name = `**${escapeMarkdown(bot.name)}**`;
       const session = this.busy.get(busyKey(bot, guild.id));
-      if (!bot.online) {
-        lines.push(`🔴 ${name} is not logged in to Discord.`);
+      if (bot.loginFailed) {
+        lines.push(`🔴 ${name} could not log in to Discord. Its token may have been reset.`);
+      } else if (!bot.online) {
+        lines.push(`🔴 ${name} is not connected to Discord right now.`);
       } else if (!bot.guild(guild.id)) {
         const invite = showInvites ? bot.inviteLink() : null;
         lines.push(`⚪ ${name} is not in this server.${invite ? ` [Invite it](<${invite}>)` : ''}`);
@@ -408,7 +413,7 @@ export class MusicService {
     lines.push(
       `-# Each bot plays in one voice channel at a time, so this server can have music in ${countOf(here, 'channel')} at once.`,
     );
-    return lines.join('\n');
+    return fitLines(lines);
   }
 
   // ── the "now playing" message ───────────────────────────────────────────
@@ -993,7 +998,7 @@ export class MusicService {
           : '';
       log.warn(
         `${bot.name} cannot connect to the music server at ${where}: ${reason}.${hint} ` +
-          `Trying again every ${Math.round(tuning.lavalinkRetryMs / 1000)} s until it works.`,
+          `Trying again every ${describeSpan(tuning.lavalinkRetryMs)} until it works.`,
       );
     }
   }
@@ -1112,10 +1117,11 @@ function isTrack(value: unknown): value is Track {
   return typeof track.encoded === 'string' && typeof track.info === 'object' && track.info !== null;
 }
 
-/** "5 minutes", "30 seconds". */
+/** "5 minutes", "30 seconds", "50 ms". */
 function describeSpan(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
   const minutes = Math.round(ms / 60_000);
-  return minutes >= 1 ? countOf(minutes, 'minute') : countOf(Math.max(1, Math.round(ms / 1000)), 'second');
+  return minutes >= 1 ? countOf(minutes, 'minute') : countOf(Math.round(ms / 1000), 'second');
 }
 
 function countOf(count: number, noun: string): string {

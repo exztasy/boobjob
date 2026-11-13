@@ -43,8 +43,26 @@ export function trackLine(track: Track): string {
  * fit into an ordinary message whatever the titles are.
  */
 export function compactLine(track: Track): string {
-  const author = plainText(track.info.author, 25);
-  return `**${plainText(track.info.title, 45) || 'Untitled'}**${author ? ` · ${author}` : ''} · \`${trackLength(track)}\``;
+  const author = plainText(track.info.author, 20);
+  return `**${plainText(track.info.title, 40) || 'Untitled'}**${author ? ` · ${author}` : ''} · \`${trackLength(track)}\``;
+}
+
+/** Discord's limit on the text of an ordinary message. */
+export const MAX_MESSAGE_LENGTH = 2000;
+
+/**
+ * Joins lines into a message of at most `limit` characters. What does not
+ * fit is left out a whole line at a time, from the end, with a note saying
+ * how much is missing.
+ */
+export function fitLines(lines: readonly string[], limit = MAX_MESSAGE_LENGTH): string {
+  const all = lines.join('\n');
+  if (all.length <= limit) return all;
+  for (let kept = lines.length - 1; kept > 0; kept--) {
+    const text = [...lines.slice(0, kept), `…and ${lines.length - kept} more.`].join('\n');
+    if (text.length <= limit) return text;
+  }
+  return truncate(all, limit);
 }
 
 /** Why a track could not be played, in words fit for the people listening. */
@@ -64,9 +82,12 @@ export function plainText(text: string | null | undefined, max: number): string 
   return escapeMarkdown(truncate(collapsed, max)).replace(/[[\]]/gu, (bracket) => (bracket === '[' ? '(' : ')'));
 }
 
-/** The link in a form that cannot break out of Markdown's `(...)`, or `null` if it is not a web link. */
+/**
+ * The link in a form that cannot break out of Markdown's `(...)`; `null` if
+ * it is not a web link, or too long to spend that much of a message on.
+ */
 function safeLink(uri: string | null | undefined): string | null {
-  if (!uri || uri.length > MAX_LINK_LENGTH) return null;
-  if (!/^https?:\/\//iu.test(uri) || /\s/u.test(uri) || !URL.canParse(uri)) return null;
-  return uri.replace(/[()<>]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  if (!uri || !/^https?:\/\//iu.test(uri) || /\s/u.test(uri) || !URL.canParse(uri)) return null;
+  const link = uri.replace(/[()<>]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return link.length <= MAX_LINK_LENGTH ? link : null;
 }
